@@ -5,4 +5,4 @@ Uses linux frambuffer to access the graphics mode.
 
 
 ### Building & running
-Use the prepared Makefile an just run ```make all``` for building (or ```make clean``` for cleaning the build).
+Use the prepared Makefile and just run ```make all``` for building (or ```make clean``` for cleaning the build).
