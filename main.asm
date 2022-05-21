@@ -33,6 +33,11 @@ section		.rodata
 ; ----- Strings -----
 str_info_fclose_fail	db	'Failed to close file!', 0xa, 0
 str_err_fopen		db	'Failed to open file!', 0xa, 0
+str_finfo_err		db	'Error reading fixed screen information', 0xa, 0
+str_vinfo_err		db	'Error reading variable screen information', 0xa, 0
+str_ioctl_finfo_err	db	'IOCTL syscall failed when reading fixed screen info!', 0xa, 0
+str_ioctl_vinfo_err	db	'IOCTL syscall failed when reading variable screen info!', 0xa, 0
+str_mmap_err		db	'MMAP syscall failed - cannot map framebuffer into memory!', 0xa, 0
 str_err_code		db	'Error code: %d', 0xa, 0
 
 str_title		db	'Flappy Bird', 0
@@ -51,6 +56,7 @@ prng_seed		dw	0
 ; ----- Equate Directives -----
 SYS_OPEN    	equ 2
 SYS_CLOSE	equ 3
+SYS_MMAP	equ 9
 SYS_IOCTL	equ 16
 SYS_EXIT	equ 60
 SYS_TIME	equ 201
@@ -72,6 +78,11 @@ VSCREENINFO_YRES_OFFSET		equ 4
 VSCREENINFO_XOFFSET_OFFSET	equ 16
 VSCREENINFO_YOFFSET_OFFSET	equ 20
 VSCREENINFO_BPP_OFFSET		equ 24
+
+PROT_READ	equ 0
+PROT_WRITE	equ 1
+
+MAP_SHARED	equ 1
 
 
 ; ===== TEXT SECTION =====
@@ -214,12 +225,27 @@ get_line_len:
 	mov rdx, rsp
 	syscall
 
+	cmp rax, 0
+	jl .l_info_read_err
+
 	xor rax, rax
 	mov eax, dword[rsp + FSCREENINFO_LINE_LENGTH_OFFSET]
 	
 	; free memory
 	add rsp, FBIOGET_FSCREENINFO_SIZE
 	ret
+
+	.l_info_read_err:
+		push rax
+		mov rdi, str_err_code
+		mov rsi, rax
+		xor eax, eax
+		call printf
+		pop rax
+
+		add rsp, FBIOGET_FSCREENINFO_SIZE ; free memory
+		mov rdi, [str_ioctl_finfo_err]
+		jmp quit_with_error ; tailcall
 
 
 ; Gets variable screen info line length and stores it
@@ -237,6 +263,9 @@ get_var_scr_info:
 	mov rdx, rsp
 	syscall
 
+	cmp rax, 0
+	jl .l_info_read_err
+
 	xor rax, rax
 	mov eax, dword[rsp + VSCREENINFO_XRES_OFFSET]
 	mov dword[r8], eax
@@ -248,11 +277,79 @@ get_var_scr_info:
 	mov dword[r8+12], eax
 	mov eax, dword[rsp + VSCREENINFO_BPP_OFFSET]
 	mov dword[r8+16], eax
-	
+
 	; free memory
 	add rsp, FBIOGET_VSCREENINFO_SIZE
 	ret
 
+	.l_info_read_err:
+		add rsp, FBIOGET_VSCREENINFO_SIZE ; free memory
+		
+		push rax
+		mov rdi, str_err_code
+		mov rsi, rax
+		xor eax, eax
+		call printf
+		pop rax
+
+		mov rdi, [str_ioctl_vinfo_err]
+		jmp quit_with_error ; tailcall
+
+
+; Returns screen buffer size
+; @param edi - xres
+; @param esi - yres
+; @param edx - bits per pixel
+;
+get_screen_buffer_size:
+	mov eax, edx
+	shr eax, 3
+	mul edi
+	mul esi
+	ret
+
+
+; Tries to map framebuffer file into process memory.
+; Returns pointer to memory block mapped by mmap syscall
+; @param rdi - framebuffer file descriptor
+; @param rsi - ptr to var_scr_info struct
+;
+map_framebuffer:	
+	mov rcx, rsi
+
+	push rdi
+	mov edi, dword [rcx] 		; xres
+	mov esi, dword [rcx + 4]	; yres
+	mov edx, dword [rcx + 16]	; bits per pixel
+
+	call get_screen_buffer_size
+	pop r8
+
+	xor rdi, rdi
+	mov rsi, rax
+	mov rdx, PROT_READ
+	or rdx, PROT_WRITE
+	mov r10, MAP_SHARED
+	xor r9, r9
+
+	mov rax, SYS_MMAP
+	syscall
+
+	cmp rax, 0
+	jl .l_mmap_err
+	ret
+
+	.l_mmap_err:
+		push rax
+		mov rdi, str_err_code
+		mov rsi, rax
+		xor eax, eax
+		call printf
+		pop rax
+
+		mov rdi, [str_mmap_err]
+		jmp quit_with_error ; tailcall
+		
 
 ; ----- START -----
 
@@ -283,6 +380,11 @@ _start:
 	mov rdi, qword [fd_framebuffer]
 	mov rsi, qword var_scr_info
 	call get_var_scr_info
+
+	; try to map the framebuffer into memory
+	mov rdi, qword [fd_framebuffer]
+	mov rsi, var_scr_info
+	call map_framebuffer
 
 	; close framebuffer file
 	mov rdi, [fd_framebuffer]
