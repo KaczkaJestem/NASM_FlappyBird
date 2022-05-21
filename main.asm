@@ -15,6 +15,17 @@ section		.bss
 ; ----- File descriptors -----
 fd_framebuffer:		resb	4
 
+info_line_len		resb	4
+
+; Variable Screen Info struct:
+; resx : dw
+; resy : dw
+; xoffset : dw
+; yoffset : dw
+; bits_per_pixel : dw
+;
+var_scr_info		resb	20
+
 ; ===== READ ONLY DATA SECTION =====
 
 section		.rodata
@@ -40,12 +51,28 @@ prng_seed		dw	0
 ; ----- Equate Directives -----
 SYS_OPEN    	equ 2
 SYS_CLOSE	equ 3
+SYS_IOCTL	equ 16
 SYS_EXIT	equ 60
 SYS_TIME	equ 201
 
 O_RDONLY    	equ 0
 O_WRONLY	equ 1
 O_RDWR		equ 2
+
+FBIOGET_VSCREENINFO	equ 0x4600
+FBIOGET_FSCREENINFO	equ 0x4602
+
+FBIOGET_VSCREENINFO_SIZE	equ 160
+FBIOGET_FSCREENINFO_SIZE	equ 80
+
+FSCREENINFO_LINE_LENGTH_OFFSET	equ 48
+
+VSCREENINFO_XRES_OFFSET		equ 0
+VSCREENINFO_YRES_OFFSET		equ 4
+VSCREENINFO_XOFFSET_OFFSET	equ 16
+VSCREENINFO_YOFFSET_OFFSET	equ 20
+VSCREENINFO_BPP_OFFSET		equ 24
+
 
 ; ===== TEXT SECTION =====
 
@@ -175,6 +202,58 @@ close_file:
 		jmp print_info_msg	; tailcall
 
 
+; Gets fixed screen info line length and returns it in rax
+; @param rdi - framebuffer file descriptor
+;
+get_line_len:
+	; reseriving place for incoming struct
+	sub rsp, FBIOGET_FSCREENINFO_SIZE
+	
+	mov rax, SYS_IOCTL
+	mov rsi, FBIOGET_FSCREENINFO 
+	mov rdx, rsp
+	syscall
+
+	xor rax, rax
+	mov eax, dword[rsp + FSCREENINFO_LINE_LENGTH_OFFSET]
+	
+	; free memory
+	add rsp, FBIOGET_FSCREENINFO_SIZE
+	ret
+
+
+; Gets variable screen info line length and stores it
+; in the var_scr_info struct
+; @param rdi - framebuffer file descriptor
+; @param rsi - ptr to 20-byte space for var_scr_info struct
+;
+get_var_scr_info:
+	; reserving place for incoming struct
+	mov r8, rsi
+	sub rsp, FBIOGET_VSCREENINFO_SIZE
+
+	mov rax, SYS_IOCTL
+	mov rsi, FBIOGET_VSCREENINFO 
+	mov rdx, rsp
+	syscall
+
+	xor rax, rax
+	mov eax, dword[rsp + VSCREENINFO_XRES_OFFSET]
+	mov dword[r8], eax
+	mov eax, dword[rsp + VSCREENINFO_YRES_OFFSET]
+	mov dword[r8+4], eax
+	mov eax, dword[rsp + VSCREENINFO_XOFFSET_OFFSET]
+	mov dword[r8+8], eax
+	mov eax, dword[rsp + VSCREENINFO_YOFFSET_OFFSET]
+	mov dword[r8+12], eax
+	mov eax, dword[rsp + VSCREENINFO_BPP_OFFSET]
+	mov dword[r8+16], eax
+	
+	; free memory
+	add rsp, FBIOGET_VSCREENINFO_SIZE
+	ret
+
+
 ; ----- START -----
 
 _start: 
@@ -194,6 +273,16 @@ _start:
 	mov rdi, file_framebuffer
 	call open_file_rdwr
 	mov dword [fd_framebuffer], eax
+
+	; get line length and store it
+	mov rdi, qword [fd_framebuffer]
+	call get_line_len
+	mov dword [info_line_len], eax
+
+	; get variable screen info and store it
+	mov rdi, qword [fd_framebuffer]
+	mov rsi, qword var_scr_info
+	call get_var_scr_info
 
 	; close framebuffer file
 	mov rdi, [fd_framebuffer]
