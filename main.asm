@@ -24,7 +24,7 @@ str_info_fclose_fail	db	'Failed to close file!', 0xa, 0
 str_err_fopen		db	'Failed to open file!', 0xa, 0
 str_err_code		db	'Error code: %d', 0xa, 0
 
-str_title		db	'Floppy Bird', 0
+str_title		db	'Flappy Bird', 0
 str_play		db	'Play!', 0
 str_quit		db	'Quit', 0
 
@@ -128,7 +128,7 @@ get_rand_int:
 open_file_rdwr:
 	mov rax, SYS_OPEN	; sys_open, returns file descriptor in rax
 	mov rsi, 2		; O_RDWR
-	mov rdx, 0666o		; flags: read only
+	mov rdx, 0q0666		; umode: can r/w, but not exec
 	syscall
 
 
