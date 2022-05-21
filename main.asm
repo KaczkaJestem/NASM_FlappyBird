@@ -13,7 +13,7 @@ extern printf
 section		.bss
 
 ; ----- File descriptors -----
-fd_framebuffer:		resb	4
+fd_framebuffer		resb	4
 
 info_line_len		resb	4
 
@@ -25,6 +25,9 @@ info_line_len		resb	4
 ; bits_per_pixel : dw
 ;
 var_scr_info		resb	20
+
+framebuffer_ptr		resb	8
+framebuffer_size	resb 	8
 
 ; ===== READ ONLY DATA SECTION =====
 
@@ -38,6 +41,7 @@ str_vinfo_err		db	'Error reading variable screen information', 0xa, 0
 str_ioctl_finfo_err	db	'IOCTL syscall failed when reading fixed screen info!', 0xa, 0
 str_ioctl_vinfo_err	db	'IOCTL syscall failed when reading variable screen info!', 0xa, 0
 str_mmap_err		db	'MMAP syscall failed - cannot map framebuffer into memory!', 0xa, 0
+str_munmap_err		db	'MUNMAP syscall failed - cannot unmap framebuffer from memory!', 0xa, 0
 str_err_code		db	'Error code: %d', 0xa, 0
 
 str_title		db	'Flappy Bird', 0
@@ -57,6 +61,7 @@ prng_seed		dw	0
 SYS_OPEN    	equ 2
 SYS_CLOSE	equ 3
 SYS_MMAP	equ 9
+SYS_MUNMAP	equ 11
 SYS_IOCTL	equ 16
 SYS_EXIT	equ 60
 SYS_TIME	equ 201
@@ -310,7 +315,8 @@ get_screen_buffer_size:
 
 
 ; Tries to map framebuffer file into process memory.
-; Returns pointer to memory block mapped by mmap syscall
+; Returns pointer to memory block mapped by mmap syscall in rax
+; and the size of that block in rdx.
 ; @param rdi - framebuffer file descriptor
 ; @param rsi - ptr to var_scr_info struct
 ;
@@ -325,6 +331,7 @@ map_framebuffer:
 	call get_screen_buffer_size
 	pop r8
 
+	push rax
 	xor rdi, rdi
 	mov rsi, rax
 	mov rdx, PROT_READ
@@ -334,6 +341,7 @@ map_framebuffer:
 
 	mov rax, SYS_MMAP
 	syscall
+	pop rdx
 
 	cmp rax, 0
 	jl .l_mmap_err
@@ -350,6 +358,29 @@ map_framebuffer:
 		mov rdi, [str_mmap_err]
 		jmp quit_with_error ; tailcall
 		
+
+; Unmaps previously allocated framebuffer memory
+; @param rdi - ptr to mapped framebuffer memory
+; @param rsi - size of framebuffer block
+;
+unmap_framebuffer:
+	mov rax, SYS_MUNMAP
+	syscall
+
+	cmp rax, 0
+	jnz .l_munmap_err
+	ret
+
+	.l_munmap_err:
+		push rax
+		mov rdi, str_err_code
+		mov rsi, rax
+		xor eax, eax
+		call printf
+		pop rax
+
+		mov rdi, [str_munmap_err]
+		jmp quit_with_error ; tailcall
 
 ; ----- START -----
 
@@ -385,6 +416,15 @@ _start:
 	mov rdi, qword [fd_framebuffer]
 	mov rsi, var_scr_info
 	call map_framebuffer
+	; store the ptr to mapped memory and
+	; save the size of allocated memory block
+	mov qword[framebuffer_ptr], rax
+	mov qword[framebuffer_size], rdx
+
+	; unmap framebuffer from memory
+	mov rdi, qword [framebuffer_ptr]
+	mov rsi, qword [framebuffer_size]
+	call unmap_framebuffer
 
 	; close framebuffer file
 	mov rdi, [fd_framebuffer]
