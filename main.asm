@@ -29,6 +29,9 @@ var_scr_info		resb	20
 framebuffer_ptr		resb	8
 framebuffer_size	resb 	8
 
+initial_break		resb	8
+current_break		resb 	8
+
 ; ===== READ ONLY DATA SECTION =====
 
 section		.rodata
@@ -42,6 +45,7 @@ str_ioctl_finfo_err	db	'IOCTL syscall failed when reading fixed screen info!', 0
 str_ioctl_vinfo_err	db	'IOCTL syscall failed when reading variable screen info!', 0xa, 0
 str_mmap_err		db	'MMAP syscall failed - cannot map framebuffer into memory!', 0xa, 0
 str_munmap_err		db	'MUNMAP syscall failed - cannot unmap framebuffer from memory!', 0xa, 0
+str_enomem_err		db	'Failed to allocate memory! Reason: SYS_BRK returned ENOMEM', 0xa, 0
 str_err_code		db	'Error code: %d', 0xa, 0
 
 str_title		db	'Flappy Bird', 0
@@ -62,6 +66,7 @@ SYS_OPEN    	equ 2
 SYS_CLOSE	equ 3
 SYS_MMAP	equ 9
 SYS_MUNMAP	equ 11
+SYS_BRK		equ 12
 SYS_IOCTL	equ 16
 SYS_EXIT	equ 60
 SYS_TIME	equ 201
@@ -89,6 +94,7 @@ PROT_WRITE	equ 1
 
 MAP_SHARED	equ 1
 
+ENOMEM		equ 12
 
 ; ===== TEXT SECTION =====
 
@@ -382,10 +388,56 @@ unmap_framebuffer:
 		mov rdi, [str_munmap_err]
 		jmp quit_with_error ; tailcall
 
+
+; Uses sys_brk to get the current break address and
+; return it in rax
+;
+get_curr_brk:
+	mov rax, SYS_BRK
+	xor rdi, rdi
+	syscall
+	ret
+
+
+; Tries to allocate given amount of bytes on the heap;
+; Returns address to allocated memory on success
+; @param rdi - number of bytes to allocate
+;
+my_malloc:
+	mov rsi, rdi
+	mov rax, SYS_BRK
+	mov rdi, qword[current_break]
+	add rdi, rsi
+	syscall
+	
+	cmp rax, ENOMEM
+	je .l_alloc_err
+
+	mov qword[current_break], rax
+	ret
+
+	.l_alloc_err:
+		mov rdi, [str_enomem_err]
+		jmp quit_with_error 	; tailcall
+
+
+; Resets break address to its initial value.
+; Should free all memory previously allocated with my_malloc
+;
+my_free_all:
+	mov    rax, SYS_BRK
+	mov    rdi, qword[initial_break]
+	syscall
+	mov    qword[current_break], rax
+
 ; ----- START -----
 
 _start: 
 	; RSP is already 16-bit alligned here
+
+	; get current break address and store it
+	call get_curr_brk
+	mov qword[initial_break], rax
 
 	; set up the PRNG seed using sys_time
 	call get_sys_time
