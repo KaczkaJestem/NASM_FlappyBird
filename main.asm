@@ -23,6 +23,21 @@ info_line_len		resb	4
 ;
 var_scr_info		resb	20
 
+; Termios struct representation
+;
+; struct termios {
+;     tcflag_t c_iflag;               /* input mode flags */
+;     tcflag_t c_oflag;               /* output mode flags */
+;     tcflag_t c_cflag;               /* control mode flags */
+;     tcflag_t c_lflag;               /* local mode flags */
+;     cc_t c_line;                    /* line discipline */
+;     cc_t c_cc[NCCS];                /* control characters; NCCS = 19 */
+; };
+;
+; where sizeof(tcflag_) = 4 and sizeof(cc_t) = 1
+;
+termios				resb	36
+
 framebuffer_size	resb 	8
 
 ; ===== READ ONLY DATA SECTION =====
@@ -36,6 +51,8 @@ str_finfo_err			db	'Error reading fixed screen information', 0xa, 0
 str_vinfo_err			db	'Error reading variable screen information', 0xa, 0
 str_ioctl_finfo_err		db	'IOCTL syscall failed when reading fixed screen info!', 0xa, 0
 str_ioctl_vinfo_err		db	'IOCTL syscall failed when reading variable screen info!', 0xa, 0
+str_ioctl_tcgets_err	db	'IOCTL syscall failed when getting terminal parameters!', 0xa, 0
+str_ioctl_tcsets_err	db	'IOCTL syscall failed when setting terminal parameters!', 0xa, 0
 str_mmap_err			db	'MMAP syscall failed - cannot map framebuffer into memory!', 0xa, 0
 str_munmap_err			db	'MUNMAP syscall failed - cannot unmap framebuffer from memory!', 0xa, 0
 str_brk_err				db	'BRK syscall failed. Cannot allocate memory!', 0xa, 0
@@ -60,12 +77,14 @@ initial_break_ptr		dq	0
 current_break_ptr		dq	0
 
 ; ----- File descriptors -----
+fd_stdin			equ	0
 fd_framebuffer		dd	-1
 
 ; ----- Pseudo randomness -----
 prng_seed		dd	0
 
 ; ----- Equate Directives -----
+SYS_READ		equ 0
 SYS_OPEN    	equ 2
 SYS_CLOSE		equ 3
 SYS_MMAP		equ 9
@@ -100,6 +119,11 @@ MAP_SHARED	equ 1
 
 MAP_FAILED	equ -1
 
+TCGETS		equ 0x5401
+TCSETS		equ 0x5402
+ICANON		equ 2
+ECHO		equ 8
+
 ; ===== TEXT SECTION =====
 
 section     .text
@@ -123,7 +147,7 @@ print_info_msg:
 ;
 quit_with_error:
 	sub rsp, 8
-        xor eax, eax    ; printf is varargs, so EAX counts # of non-integer arguments being passed        
+    xor eax, eax    ; printf is varargs, so EAX counts # of non-integer arguments being passed        
 	call printf
 	add rsp, 8
 
@@ -257,7 +281,7 @@ get_line_len:
 		pop rax
 
 		add rsp, FBIOGET_FSCREENINFO_SIZE ; free memory
-		mov rdi, [str_ioctl_finfo_err]
+		mov rdi, str_ioctl_finfo_err
 		jmp quit_with_error ; tailcall
 
 
@@ -305,7 +329,7 @@ get_var_scr_info:
 		call printf
 		pop rax
 
-		mov rdi, [str_ioctl_vinfo_err]
+		mov rdi, str_ioctl_vinfo_err
 		jmp quit_with_error ; tailcall
 
 
@@ -363,7 +387,7 @@ map_framebuffer:
 		call printf
 		pop rax
 
-		mov rdi, [str_mmap_err]
+		mov rdi, str_mmap_err
 		jmp quit_with_error ; tailcall
 		
 
@@ -387,7 +411,7 @@ unmap_framebuffer:
 		call printf
 		pop rax
 
-		mov rdi, [str_munmap_err]
+		mov rdi, str_munmap_err
 		jmp quit_with_error ; tailcall
 
 
@@ -419,7 +443,7 @@ my_malloc:
 	ret
 
 	.l_alloc_err:
-		mov rdi, qword[str_brk_err]
+		mov rdi, str_brk_err
 		jmp quit_with_error 	; tailcall
 
 
@@ -443,6 +467,133 @@ my_memcpy:
         mov     rcx, rdx
         rep     movsb
         ret          
+
+
+; Reads terminal parameters to the given termios struct
+; @param rdi - ptr to termios struct
+;
+read_stdin_termios:
+        mov rax, SYS_IOCTL
+        mov rdx, rdi
+        mov rdi, fd_stdin
+        mov rsi, TCGETS
+        syscall
+
+		cmp rax, 0
+		jl .l_read_err
+        ret
+
+		.l_read_err:
+			push rax
+			mov rdi, str_err_code
+			mov rsi, rax
+			xor eax, eax
+			call printf
+			pop rax
+
+			mov rdi, str_ioctl_tcgets_err
+			jmp quit_with_error ; tailcall
+
+
+; Stores terminal parameters obtained from the given termios struct
+; @param rdi - ptr to termios struct
+;
+write_stdin_termios:
+        mov rax, SYS_IOCTL
+        mov rdx, rdi
+        mov rdi, fd_stdin
+        mov rsi, TCSETS
+        syscall
+
+		cmp rax, 0
+		jl .l_store_err
+        ret
+
+		.l_store_err:
+			push rax
+			mov rdi, str_err_code
+			mov rsi, rax
+			xor eax, eax
+			call printf
+			pop rax
+
+			mov rdi, str_ioctl_tcsets_err
+			jmp quit_with_error ; tailcall
+
+
+; Sets the canonical flag in current termial params to the given value.
+; @param rdi - new canonical flag value : 0 is false, non-zero is true 
+;
+set_canonical_flag:
+		push rdi
+		mov rdi, qword termios
+        call read_stdin_termios
+		pop rdi
+
+		cmp rdi, 0
+		je .l_unset
+
+		; set canonical bit in local mode flags
+        or dword [termios + 12], ICANON
+		jmp .l_store_params
+
+		.l_unset:
+        	; clear canonical bit in local mode flags
+        	and dword [termios + 12], ~ICANON
+
+		.l_store_params:
+			sub rsp, 8
+			mov rdi, qword termios
+        	call write_stdin_termios
+			add rsp, 8
+
+        ret
+
+
+; Sets the echo flag in current termial params to the given value.
+; @param rdi - new canonical flag value : 0 is false, non-zero is true 
+;
+set_echo_flag:
+	push rdi
+	mov rdi, qword termios
+    call read_stdin_termios
+	pop rdi
+
+	cmp rdi, 0
+	je .l_unset
+
+    ; set echo bit in local mode flags
+    or dword [termios + 12], ECHO
+	jmp .l_store_params
+    
+	.l_unset:
+		; clear echo bit in local mode flags
+        and dword [termios+12], ~ECHO
+
+	.l_store_params:
+		sub rsp, 8
+		mov rdi, qword termios
+		call write_stdin_termios
+		add rsp, 8
+
+	ret
+
+
+; Reads a single byte from stdin and returns it in rax
+;
+read_stdin_byte:
+	sub         rsp, 8			; allocate 8-byte space on the stack as read buffer
+	
+	mov         rax, SYS_READ	; set SYS_READ as SYS_CALL value
+	mov         rdi, fd_stdin	; set rdi to 0 to indicate a STDIN file descriptor
+	lea         rsi, [rsp]		; set const char *buf to the 8-byte space on stack
+	mov         rdx, 1			; set size_t count to 1 for one char
+	syscall
+
+	movzx rax, byte[rsp]
+	add rsp, 8
+
+	ret
 
 
 ; Does the cleanup and exits the program with given code.
@@ -493,6 +644,14 @@ exit:
 		je .l_quit		
 
 		call my_free_all
+
+	; set canonical flag back in terminal params
+	mov rdi, 1 
+	call set_canonical_flag
+
+	; and set echo flag back in terminal params
+	mov rdi, 1
+	call set_echo_flag
 
 	; quit program
 	.l_quit:
@@ -553,10 +712,27 @@ _start:
 	mov rdx, qword[framebuffer_size]
 	call my_memcpy
 
-	;;;
+	; to read a single character without waiting
+	; for the user to press enter, we must first
+	; disable canonical mode
+	xor rdi, rdi
+	call set_canonical_flag
+
+	; also disable the echo in the terminal
+	xor rdi, rdi
+	call set_echo_flag
 
 	;;;
+	.l_main_loop:
+		call read_stdin_byte
 
+		cmp rax, 113
+		je .l_program_exit
+
+		jmp .l_main_loop
+	;;;
+
+	.l_program_exit:
 	; exit normally
 	mov rdi, 0
 	call exit
