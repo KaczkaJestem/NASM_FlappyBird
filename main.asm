@@ -12,9 +12,6 @@ extern printf
 
 section		.bss
 
-; ----- File descriptors -----
-fd_framebuffer		resb	4
-
 info_line_len		resb	4
 
 ; Variable Screen Info struct:
@@ -26,11 +23,7 @@ info_line_len		resb	4
 ;
 var_scr_info		resb	20
 
-framebuffer_ptr		resb	8
 framebuffer_size	resb 	8
-
-initial_break		resb	8
-current_break		resb 	8
 
 ; ===== READ ONLY DATA SECTION =====
 
@@ -38,42 +31,53 @@ section		.rodata
 
 ; ----- Strings -----
 str_info_fclose_fail	db	'Failed to close file!', 0xa, 0
-str_err_fopen		db	'Failed to open file!', 0xa, 0
-str_finfo_err		db	'Error reading fixed screen information', 0xa, 0
-str_vinfo_err		db	'Error reading variable screen information', 0xa, 0
-str_ioctl_finfo_err	db	'IOCTL syscall failed when reading fixed screen info!', 0xa, 0
-str_ioctl_vinfo_err	db	'IOCTL syscall failed when reading variable screen info!', 0xa, 0
-str_mmap_err		db	'MMAP syscall failed - cannot map framebuffer into memory!', 0xa, 0
-str_munmap_err		db	'MUNMAP syscall failed - cannot unmap framebuffer from memory!', 0xa, 0
-str_enomem_err		db	'Failed to allocate memory! Reason: SYS_BRK returned ENOMEM', 0xa, 0
-str_err_code		db	'Error code: %d', 0xa, 0
+str_err_fopen			db	'Failed to open file!', 0xa, 0
+str_finfo_err			db	'Error reading fixed screen information', 0xa, 0
+str_vinfo_err			db	'Error reading variable screen information', 0xa, 0
+str_ioctl_finfo_err		db	'IOCTL syscall failed when reading fixed screen info!', 0xa, 0
+str_ioctl_vinfo_err		db	'IOCTL syscall failed when reading variable screen info!', 0xa, 0
+str_mmap_err			db	'MMAP syscall failed - cannot map framebuffer into memory!', 0xa, 0
+str_munmap_err			db	'MUNMAP syscall failed - cannot unmap framebuffer from memory!', 0xa, 0
+str_brk_err				db	'BRK syscall failed. Cannot allocate memory!', 0xa, 0
+str_err_code			db	'Error code: %d', 0xa, 0
 
-str_title		db	'Flappy Bird', 0
-str_play		db	'Play!', 0
-str_quit		db	'Quit', 0
+str_title				db	'Flappy Bird', 0
+str_play				db	'Play!', 0
+str_quit				db	'Quit', 0
 
-file_framebuffer	db	'/dev/fb0', 0
+file_framebuffer		db	'/dev/fb0', 0
 
 ; ===== DATA SECTION =====
 
 section		.data
 
+; ----- Pointers -----
+
+; we make them "null pointers" at the beginning
+framebuffer_ptr			dq	0
+framebuffer_backup_ptr	dq	0
+initial_break_ptr		dq	0
+current_break_ptr		dq	0
+
+; ----- File descriptors -----
+fd_framebuffer		dd	-1
+
 ; ----- Pseudo randomness -----
-prng_seed		dw	0
+prng_seed		dd	0
 
 ; ----- Equate Directives -----
 SYS_OPEN    	equ 2
-SYS_CLOSE	equ 3
-SYS_MMAP	equ 9
-SYS_MUNMAP	equ 11
-SYS_BRK		equ 12
-SYS_IOCTL	equ 16
-SYS_EXIT	equ 60
-SYS_TIME	equ 201
+SYS_CLOSE		equ 3
+SYS_MMAP		equ 9
+SYS_MUNMAP		equ 11
+SYS_BRK			equ 12
+SYS_IOCTL		equ 16
+SYS_EXIT		equ 60
+SYS_TIME		equ 201
 
 O_RDONLY    	equ 0
-O_WRONLY	equ 1
-O_RDWR		equ 2
+O_WRONLY		equ 1
+O_RDWR			equ 2
 
 FBIOGET_VSCREENINFO	equ 0x4600
 FBIOGET_FSCREENINFO	equ 0x4602
@@ -89,12 +93,12 @@ VSCREENINFO_XOFFSET_OFFSET	equ 16
 VSCREENINFO_YOFFSET_OFFSET	equ 20
 VSCREENINFO_BPP_OFFSET		equ 24
 
-PROT_READ	equ 0
-PROT_WRITE	equ 1
+PROT_READ	equ 1
+PROT_WRITE	equ 2
 
 MAP_SHARED	equ 1
 
-ENOMEM		equ 12
+MAP_FAILED	equ -1
 
 ; ===== TEXT SECTION =====
 
@@ -124,9 +128,7 @@ quit_with_error:
 	add rsp, 8
 
 	mov rdi, -1		; exit code
-	mov eax, SYS_EXIT
-	syscall			; linux kernel interrupt
-	ret
+	jmp exit		; tailcall
 
 
 ; Returns system time in rax; used mainly as seed for prng
@@ -349,8 +351,8 @@ map_framebuffer:
 	syscall
 	pop rdx
 
-	cmp rax, 0
-	jl .l_mmap_err
+	cmp rax, MAP_FAILED
+	je .l_mmap_err
 	ret
 
 	.l_mmap_err:
@@ -404,20 +406,20 @@ get_curr_brk:
 ; @param rdi - number of bytes to allocate
 ;
 my_malloc:
-	mov rsi, rdi
-	mov rax, SYS_BRK
-	mov rdi, qword[current_break]
-	add rdi, rsi
+	mov rax, SYS_BRK 
+	add rdi, qword[current_break_ptr]
 	syscall
 	
-	cmp rax, ENOMEM
+	cmp rax, qword[current_break_ptr]
 	je .l_alloc_err
 
-	mov qword[current_break], rax
+	mov rdx, qword[current_break_ptr]
+	mov qword[current_break_ptr], rax
+	mov rax, rdx
 	ret
 
 	.l_alloc_err:
-		mov rdi, [str_enomem_err]
+		mov rdi, qword[str_brk_err]
 		jmp quit_with_error 	; tailcall
 
 
@@ -426,9 +428,80 @@ my_malloc:
 ;
 my_free_all:
 	mov    rax, SYS_BRK
-	mov    rdi, qword[initial_break]
+	mov    rdi, qword[initial_break_ptr]
 	syscall
-	mov    qword[current_break], rax
+	mov    qword[current_break_ptr], rax
+	ret
+
+
+; Copies given number of bytes from source to destination
+; @param rdi - destination ptr
+; @param rsi - source ptr
+; @param rdx - number of bytes to copy
+;
+my_memcpy:
+        mov     rcx, rdx
+        rep     movsb
+        ret          
+
+
+; Does the cleanup and exits the program with given code.
+; @param rdi - exit code
+;
+exit:
+	; save the exit code
+	push rdi
+
+	; restore the framebuffer
+	.l_restore_framebuffer:
+		; check framebuffer pointers
+		mov rax, qword[framebuffer_backup_ptr]
+		cmp rax, 0
+		je .l_unmap_framebuffer
+		mov rax, qword[framebuffer_ptr]
+		cmp rax, 0
+		je .l_unmap_framebuffer
+
+		mov rdi, qword[framebuffer_ptr]
+		mov rsi, qword[framebuffer_backup_ptr]
+		mov rdx, qword[framebuffer_size]
+		call my_memcpy
+		
+	; unmap framebuffer from memory
+	.l_unmap_framebuffer:
+		mov rax, qword[framebuffer_ptr]
+		cmp rax, 0
+		je .l_close_framebuffer_fd
+
+		mov rdi, qword [framebuffer_ptr]
+		mov rsi, qword [framebuffer_size]
+		call unmap_framebuffer
+
+	; close framebuffer file
+	.l_close_framebuffer_fd:
+		mov eax, dword[fd_framebuffer]
+		cmp eax, 0
+		jl .l_free_all_memory
+
+		mov rdi, [fd_framebuffer]
+		call close_file	
+
+	; free memory
+	.l_free_all_memory:
+		mov rax, qword[initial_break_ptr]
+		cmp rax, 0
+		je .l_quit		
+
+		call my_free_all
+
+	; quit program
+	.l_quit:
+	pop rdi			; exit code goes back to rdi
+
+	mov eax, SYS_EXIT
+	syscall
+	ret			; probably not necessary, but...
+
 
 ; ----- START -----
 
@@ -437,17 +510,12 @@ _start:
 
 	; get current break address and store it
 	call get_curr_brk
-	mov qword[initial_break], rax
+	mov qword[initial_break_ptr], rax
+	mov qword[current_break_ptr], rax
 
 	; set up the PRNG seed using sys_time
 	call get_sys_time
 	mov dword [prng_seed], eax
-
-	; get random int between 50 and 100
-	mov rdx, prng_seed
-	mov esi, 100
-	mov edi, 50
-	call get_rand_int
 
 	; open framebuffer file and store the FD
 	mov rdi, file_framebuffer
@@ -468,22 +536,28 @@ _start:
 	mov rdi, qword [fd_framebuffer]
 	mov rsi, var_scr_info
 	call map_framebuffer
+
 	; store the ptr to mapped memory and
 	; save the size of allocated memory block
 	mov qword[framebuffer_ptr], rax
 	mov qword[framebuffer_size], rdx
 
-	; unmap framebuffer from memory
-	mov rdi, qword [framebuffer_ptr]
-	mov rsi, qword [framebuffer_size]
-	call unmap_framebuffer
+	; allocate memory and copy the framebuffer there
+	; to be able to restore it on program exit
+	mov rdi, qword[framebuffer_size]
+	call my_malloc
+	mov qword[framebuffer_backup_ptr], rax
+	
+	mov rdi, qword[framebuffer_backup_ptr]
+	mov rsi, qword[framebuffer_ptr]
+	mov rdx, qword[framebuffer_size]
+	call my_memcpy
 
-	; close framebuffer file
-	mov rdi, [fd_framebuffer]
-	call close_file
+	;;;
 
-	; quit program
-	mov rdi, 0 ; normal exit code
-	mov eax, SYS_EXIT
-	syscall
+	;;;
+
+	; exit normally
+	mov rdi, 0
+	call exit
 
