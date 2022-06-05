@@ -12,16 +12,23 @@ extern printf
 
 section		.bss
 
-info_line_len		resb	4
+; ----- Structures -----
 
-; Variable Screen Info struct:
+; Screen Info struct:
 ; resx : dw
 ; resy : dw
 ; xoffset : dw
 ; yoffset : dw
 ; bits_per_pixel : dw
+; line_length : dw
 ;
-var_scr_info		resb	20
+scr_info			resb	24
+
+; Drawing context struct:
+; screen_info_ptr : qw
+; framebuffer_ptr : qw
+;
+drawing_ctx			resb 	16
 
 ; Termios struct representation
 ;
@@ -37,6 +44,16 @@ var_scr_info		resb	20
 ; where sizeof(tcflag_) = 4 and sizeof(cc_t) = 1
 ;
 termios				resb	36
+
+; Rectangle struct:
+; xpos : dw
+; ypos : dw
+; width : dw
+; height : dw
+;
+rectangle			resb	16
+
+; ----- Variables -----
 
 framebuffer_size	resb 	8
 
@@ -107,6 +124,21 @@ VSCREENINFO_YRES_OFFSET		equ 4
 VSCREENINFO_XOFFSET_OFFSET	equ 16
 VSCREENINFO_YOFFSET_OFFSET	equ 20
 VSCREENINFO_BPP_OFFSET		equ 24
+
+SCRINFO_XRES				equ 0
+SCRINFO_YRES				equ 4
+SCRINFO_XOFFSET				equ 8
+SCRINFO_YOFFSET				equ 12
+SCRINFO_BPP					equ 16
+SCRINFO_LINE_LEN			equ 20
+
+DRAWINGCTX_SCR_INFO			equ 0
+DRAWINGCTX_FRAMEBUFFER_PTR	equ 8
+
+RECT_XPOS					equ 0
+RECT_YPOS					equ 4
+RECT_WIDTH					equ 8
+RECT_HEIGHT					equ 12
 
 PROT_READ	equ 1
 PROT_WRITE	equ 2
@@ -291,10 +323,9 @@ get_line_len:
 		jmp quit_with_error ; tailcall
 
 
-; Gets variable screen info line length and stores it
-; in the var_scr_info struct
+; Gets variable screen info and stores it in the scr_info struct
 ; @param rdi - framebuffer file descriptor
-; @param rsi - ptr to 20-byte space for var_scr_info struct
+; @param rsi - ptr to 24-byte space for scr_info struct
 ;
 get_var_scr_info:
 	; reserving place for incoming struct
@@ -311,15 +342,15 @@ get_var_scr_info:
 
 	xor rax, rax
 	mov eax, dword[rsp + VSCREENINFO_XRES_OFFSET]
-	mov dword[r8], eax
+	mov dword[r8 + SCRINFO_XRES], eax
 	mov eax, dword[rsp + VSCREENINFO_YRES_OFFSET]
-	mov dword[r8+4], eax
+	mov dword[r8 + SCRINFO_YRES], eax
 	mov eax, dword[rsp + VSCREENINFO_XOFFSET_OFFSET]
-	mov dword[r8+8], eax
+	mov dword[r8 + SCRINFO_XOFFSET], eax
 	mov eax, dword[rsp + VSCREENINFO_YOFFSET_OFFSET]
-	mov dword[r8+12], eax
+	mov dword[r8 + SCRINFO_YOFFSET], eax
 	mov eax, dword[rsp + VSCREENINFO_BPP_OFFSET]
-	mov dword[r8+16], eax
+	mov dword[r8 + SCRINFO_BPP], eax
 
 	; free memory
 	add rsp, FBIOGET_VSCREENINFO_SIZE
@@ -356,15 +387,15 @@ get_screen_buffer_size:
 ; Returns pointer to memory block mapped by mmap syscall in rax
 ; and the size of that block in rdx.
 ; @param rdi - framebuffer file descriptor
-; @param rsi - ptr to var_scr_info struct
+; @param rsi - ptr to scr_info struct
 ;
 map_framebuffer:	
 	mov rcx, rsi
 
 	push rdi
-	mov edi, dword [rcx] 		; xres
-	mov esi, dword [rcx + 4]	; yres
-	mov edx, dword [rcx + 16]	; bits per pixel
+	mov edi, dword [rcx + SCRINFO_XRES] ; xres
+	mov esi, dword [rcx + SCRINFO_YRES]	; yres
+	mov edx, dword [rcx + SCRINFO_BPP]	; bits per pixel
 
 	call get_screen_buffer_size
 	pop r8
@@ -604,55 +635,50 @@ read_stdin_byte:
 
 ; Draws a single pixel on the frame buffer
 ; @param rdi - xpos
-; @param rsx - ypos
+; @param rsi - ypos
 ; @param rdx - color (4 byte, BGRA format)
-; @param rcx - ptr to 20-byte space for var_scr_info struct
-; @param r8 - line length
-; @param r9 - framebuffer ptr
+; @param rcx - ptr to drawing_ctx struct
 ;
-draw_pixel_raw:
-	push r12	; save r12 to restore it later
+draw_pixel:
 	push rdx
 	push rsi
 	push rdi
 
-	mov rsi, rcx
-	mov ecx, dword[rsi + 8]			; xoffset
-	mov edx, dword[rsi + 12]		; yoffset
-	mov r12d, dword[rsi + 16]		; bits per pixel
-	shr r12, 3						; make it bytes per pixel
+	mov rdi, qword[rcx + DRAWINGCTX_FRAMEBUFFER_PTR]
+	mov rsi, qword[rcx + DRAWINGCTX_SCR_INFO]
+
+	mov ecx, dword[rsi + SCRINFO_XOFFSET]	; xoffset
+	mov edx, dword[rsi + SCRINFO_YOFFSET]	; yoffset
+	mov r8d, dword[rsi + SCRINFO_BPP]		; bits per pixel
+	shr r8d, 3								; make it bytes per pixel
+	mov r9d, dword[rsi + SCRINFO_LINE_LEN]	; line_length
 
 	; rsi := (x + xoffset) * bytes_per_pixel
 	pop rax
 	add eax, ecx
-	mul r12
-	mov rsi, rax
+	mul r8d
+	mov esi, eax
 
 	; rax := (y + yoffset) * line_length
 	pop rax
 	add eax, edx
-	mul r8
+	mul r9d
 
 	; rax will store calculated location of pixel data
 	add rax, rsi
-	add rax, r9
+	add rax, rdi
 
 	; set color
 	pop rcx
 	mov qword[rax], rcx
 
-	pop r12	; restore r12
 	ret
 
 
-; Draws a rectangle on a framebuffer; assumes that
-; framebuffer_ptr, info_line_len and var_scr_info
-; are already set.
-; @param rdi - xpos
-; @param rsi - ypos
-; @param rdx - width
-; @param rcx - height
-; @param r8 - color (4 byte, BGRA format)
+; Draws a rectangle on a framebuffer
+; @param rdi - ptr to rectangle struct
+; @param rsi - color (4 byte, ARGB format)
+; @param rdx - ptr to drawing_ctx struct
 ;
 draw_rectangle:
 	push rbp
@@ -661,41 +687,36 @@ draw_rectangle:
 	push r13
 	push r12
 
-	; push color on stack
-	sub rsp, 8
-	mov qword[rsp], r8
+	mov rbp, rdx 	; rbp will hold drawing_ctx ptr
+	mov r14, rsi	; r14 will hold color
+	mov r15, rdi	; r15 will hold rectangle ptr
 	
-	mov r12, rdi
-	mov rbp, r12
-	add r12, rdx 
-	mov r13, rsi
-	add r13, rcx
+	xor r12, r12
+	xor r13, r13
 	
-	mov r14, rdi
-	mov r15, rsi
+	mov r12d, dword[r15 + RECT_XPOS]	; current xpos
+	mov r13d, dword[r15 + RECT_YPOS]	; current ypos
 	
 	.l_draw_loop:
-		mov rdi, r14
-		mov rsi, r15
-		mov rdx, qword[rsp]
-		mov rcx, var_scr_info
-		mov r8d, dword[info_line_len]
-		mov r9, qword[framebuffer_ptr]
-		call draw_pixel_raw
+		mov rdi, r12		; xpos
+		mov rsi, r13		; ypos
+		mov rdx, r14		; color
+		mov rcx, rbp		; drawing_ctx ptr
+		call draw_pixel
 
-		add r14, 1
-		cmp r14, r12
-		jle .l_loop_condition
+		; go to next pixel in a row
+		add r12d, 1
+		cmp r12d, dword[r15 + RECT_WIDTH]
+		jl .l_loop_condition
 
-		add r15, 1
-		mov r14, rbp
+		; if exceeded current row length,
+		; move to the next row
+		add r13d, 1
+		mov r12d, dword[r15 + RECT_XPOS]
 		
 		.l_loop_condition:
-			cmp r15, r13
-			jle .l_draw_loop
-
-	; free color space
-	add rsp, 8
+			cmp r13d, dword[r15 + RECT_HEIGHT]
+			jl .l_draw_loop
 
 	pop r12
 	pop r13
@@ -705,7 +726,6 @@ draw_rectangle:
 
 	ret
 
-	
 
 ; Does the cleanup and exits the program with given code.
 ; @param rdi - exit code
@@ -795,16 +815,16 @@ _start:
 	; get line length and store it
 	mov rdi, qword [fd_framebuffer]
 	call get_line_len
-	mov dword [info_line_len], eax
+	mov dword [scr_info + SCRINFO_LINE_LEN], eax
 
-	; get variable screen info and store it
+	; get variable screen info data and store it
 	mov rdi, qword [fd_framebuffer]
-	mov rsi, qword var_scr_info
+	mov rsi, qword scr_info
 	call get_var_scr_info
 
 	; try to map the framebuffer into memory
 	mov rdi, qword [fd_framebuffer]
-	mov rsi, var_scr_info
+	mov rsi, scr_info
 	call map_framebuffer
 
 	; store the ptr to mapped memory and
@@ -833,13 +853,22 @@ _start:
 	xor rdi, rdi
 	call set_echo_flag
 
+	; setup the drawing context
+	mov qword[drawing_ctx + DRAWINGCTX_SCR_INFO], scr_info
+	mov rax, qword[framebuffer_ptr]
+	mov qword[drawing_ctx + DRAWINGCTX_FRAMEBUFFER_PTR], rax
+
 	;;
+	; test - setup a rectangle
+	mov dword[rectangle + RECT_XPOS], 0
+	mov dword[rectangle + RECT_YPOS], 0
+	mov dword[rectangle + RECT_WIDTH], 100
+	mov dword[rectangle + RECT_HEIGHT], 100
+
 	; test - draw a rectangle
-	mov rdi, 0
-	mov rsi, 0
-	mov rdx, 100
-	mov rcx, 100
-	mov r8, COLOR_BLUE
+	mov rdi, rectangle
+	mov rsi, COLOR_BLUE
+	mov rdx, drawing_ctx
 	call draw_rectangle
 	;;
 
