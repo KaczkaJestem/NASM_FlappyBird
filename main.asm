@@ -124,6 +124,16 @@ TCSETS		equ 0x5402
 ICANON		equ 2
 ECHO		equ 8
 
+; ----- Key codes -----
+KEY_SPACE	equ	32
+KEY_W		equ 119
+KEY_S		equ	115
+
+; ----- Colors -----
+COLOR_RED	equ 0x00ff0000
+COLOR_GREEN	equ 0x0000ff00
+COLOR_BLUE	equ 0x000000ff
+
 ; ===== TEXT SECTION =====
 
 section     .text
@@ -596,6 +606,111 @@ read_stdin_byte:
 	ret
 
 
+; Draws a single pixel on the frame buffer
+; @param rdi - xpos
+; @param rsx - ypos
+; @param rdx - color (4 byte, BGRA format)
+; @param rcx - ptr to 20-byte space for var_scr_info struct
+; @param r8 - line length
+; @param r9 - framebuffer ptr
+;
+draw_pixel_raw:
+	push r12	; save r12 to restore it later
+	push rdx
+	push rsi
+	push rdi
+
+	mov rsi, rcx
+	mov ecx, dword[rsi + 8]			; xoffset
+	mov edx, dword[rsi + 12]		; yoffset
+	mov r12d, dword[rsi + 16]		; bits per pixel
+	shr r12, 3						; make it bytes per pixel
+
+	; rsi := (x + xoffset) * bytes_per_pixel
+	pop rax
+	add eax, ecx
+	mul r12
+	mov rsi, rax
+
+	; rax := (y + yoffset) * line_length
+	pop rax
+	add eax, edx
+	mul r8
+
+	; rax will store calculated location of pixel data
+	add rax, rsi
+	add rax, r9
+
+	; set color
+	pop rcx
+	mov qword[rax], rcx
+
+	pop r12	; restore r12
+	ret
+
+
+; Draws a rectangle on a framebuffer; assumes that
+; framebuffer_ptr, info_line_len and var_scr_info
+; are already set.
+; @param rdi - xpos
+; @param rsi - ypos
+; @param rdx - width
+; @param rcx - height
+; @param r8 - color (4 byte, BGRA format)
+;
+draw_rectangle:
+	push rbp
+	push r15
+	push r14
+	push r13
+	push r12
+
+	; push color on stack
+	sub rsp, 8
+	mov qword[rsp], r8
+	
+	mov r12, rdi
+	mov rbp, r12
+	add r12, rdx 
+	mov r13, rsi
+	add r13, rcx
+	
+	mov r14, rdi
+	mov r15, rsi
+	
+	.l_draw_loop:
+		mov rdi, r14
+		mov rsi, r15
+		mov rdx, qword[rsp]
+		mov rcx, var_scr_info
+		mov r8d, dword[info_line_len]
+		mov r9, qword[framebuffer_ptr]
+		call draw_pixel_raw
+
+		add r14, 1
+		cmp r14, r12
+		jle .l_loop_condition
+
+		add r15, 1
+		mov r14, rbp
+		
+		.l_loop_condition:
+			cmp r15, r13
+			jle .l_draw_loop
+
+	; free color space
+	add rsp, 8
+
+	pop r12
+	pop r13
+	pop r14
+	pop r15
+	pop rbp
+
+	ret
+
+	
+
 ; Does the cleanup and exits the program with given code.
 ; @param rdi - exit code
 ;
@@ -722,11 +837,21 @@ _start:
 	xor rdi, rdi
 	call set_echo_flag
 
+	;;
+	; test - draw a rectangle
+	mov rdi, 0
+	mov rsi, 0
+	mov rdx, 100
+	mov rcx, 100
+	mov r8, COLOR_BLUE
+	call draw_rectangle
+	;;
+
 	;;;
 	.l_main_loop:
 		call read_stdin_byte
 
-		cmp rax, 113
+		cmp rax, KEY_W
 		je .l_program_exit
 
 		jmp .l_main_loop
