@@ -58,10 +58,6 @@ str_munmap_err			db	'MUNMAP syscall failed - cannot unmap framebuffer from memor
 str_brk_err				db	'BRK syscall failed. Cannot allocate memory!', 0xa, 0
 str_err_code			db	'Error code: %d', 0xa, 0
 
-str_title				db	'Flappy Bird', 0
-str_play				db	'Play!', 0
-str_quit				db	'Quit', 0
-
 file_framebuffer		db	'/dev/fb0', 0
 
 ; ===== DATA SECTION =====
