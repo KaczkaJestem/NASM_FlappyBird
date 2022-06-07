@@ -59,6 +59,12 @@ rect_background		resb 	16
 ;
 player				resb	20
 
+; Physics context struct:
+; gravity_acc : dw (float)
+; jump_vel : dw (float)
+;
+physics_ctx			resb	8
+
 ; ----- Variables -----
 
 framebuffer_size	resb 	8
@@ -82,9 +88,6 @@ str_brk_err				db	'BRK syscall failed. Cannot allocate memory!', 0xa, 0
 str_err_code			db	'Error code: %d', 0xa, 0
 
 file_framebuffer		db	'/dev/fb0', 0
-
-const_gravity_acc		dd	9.81
-const_jump_vel			dd	10.0
 
 const_player_rect_size	dd	32
 
@@ -145,6 +148,9 @@ SCRINFO_LINE_LEN			equ 20
 
 DRAWINGCTX_SCR_INFO			equ 0
 DRAWINGCTX_FRAMEBUFFER_PTR	equ 8
+
+PHYSCTX_GRAVITY_ACC			equ 0
+PHYSCTX_JUMP_VEL			equ 4
 
 RECT_XPOS					equ 0
 RECT_YPOS					equ 4
@@ -902,6 +908,23 @@ draw_main_scene:
 	ret
 
 
+; Sets up the physics context struct.
+; @param rdi - ptr to physics context struct
+;
+setup_physics:
+	mov dword[rdi + PHYSCTX_GRAVITY_ACC], __float32__(9.81)
+	mov dword[rdi + PHYSCTX_JUMP_VEL], __float32__(10.0)
+	ret
+
+
+; Simulates the player position based on received delta time.
+; @param rsi - ptr to player struct
+; @param rdi - ptr to physics context struct
+; @param rdx - delta time
+;
+simulate_player:
+	ret
+
 ; Does the cleanup and exits the program with given code.
 ; @param rdi - exit code
 ;
@@ -1047,13 +1070,41 @@ _start:
 	mov edx, dword[const_player_rect_size]
 	call setup_player
 
+	; setup physics context
+	mov rdi, physics_ctx
+	call setup_physics
+
+	; allocate some variables on the stack
+	sub rsp, 16
+
+	call get_sys_time
+	mov qword[rsp], rax		; last frame time
+	mov qword[rsp + 8], 0	; delta frame time
+
 	;;;
 	.l_main_loop:
+		; get current time at beginning of the frame
+		call get_sys_time
+		; and calculate the delta
+		sub rax, qword[rsp] 	
+		mov qword[rsp + 8], rax
+		; then update the last frame time
+		add rax, qword[rsp]
+		mov qword[rsp], rax
+
+		; update the player
+		mov rdi, player
+		mov rsi, physics_ctx
+		mov rdx, qword[rsp + 8]
+		call simulate_player
+
+		; draw the scene
 		mov rdi, drawing_ctx
 		mov rsi, player
 		mov rdx, rect_background
 		call draw_main_scene
 
+		; handle user input
 		call read_stdin_byte
 
 		cmp rax, KEY_W
@@ -1063,6 +1114,9 @@ _start:
 	;;;
 
 	.l_program_exit:
+	; free stack memory
+	add rsp, 16
+
 	; exit normally
 	mov rdi, 0
 	call exit
