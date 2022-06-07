@@ -51,7 +51,13 @@ termios				resb	36
 ; width : dw
 ; height : dw
 ;
-rectangle			resb	16
+rect_background		resb 	16
+
+; Player struct:
+; player_rect : rectangle
+; y_velocity : dw
+;
+player				resb	20
 
 ; ----- Variables -----
 
@@ -76,6 +82,11 @@ str_brk_err				db	'BRK syscall failed. Cannot allocate memory!', 0xa, 0
 str_err_code			db	'Error code: %d', 0xa, 0
 
 file_framebuffer		db	'/dev/fb0', 0
+
+const_gravity_acc		dd	9.81
+const_jump_vel			dd	10.0
+
+const_player_rect_size	dd	32
 
 ; ===== DATA SECTION =====
 
@@ -140,6 +151,9 @@ RECT_YPOS					equ 4
 RECT_WIDTH					equ 8
 RECT_HEIGHT					equ 12
 
+PLAYER_RECT					equ 0
+PLAYER_Y_VEL				equ 16
+
 PROT_READ	equ 1
 PROT_WRITE	equ 2
 
@@ -158,9 +172,12 @@ KEY_W		equ 119
 KEY_S		equ	115
 
 ; ----- Colors -----
-COLOR_RED	equ 0x00ff0000
-COLOR_GREEN	equ 0x0000ff00
-COLOR_BLUE	equ 0x000000ff
+COLOR_RED		equ 0x00ff0000
+COLOR_GREEN		equ 0x0000ff00
+COLOR_BLUE		equ 0x000000ff
+
+COLOR_GREY		equ 0x000f0f0f
+COLOR_YELLOW	equ 0x00ffff00
 
 ; ===== TEXT SECTION =====
 
@@ -371,14 +388,11 @@ get_var_scr_info:
 
 
 ; Returns screen buffer size
-; @param edi - xres
+; @param edi - line_length
 ; @param esi - yres
-; @param edx - bits per pixel
 ;
 get_screen_buffer_size:
-	mov eax, edx
-	shr eax, 3
-	mul edi
+	mov eax, edi
 	mul esi
 	ret
 
@@ -393,9 +407,8 @@ map_framebuffer:
 	mov rcx, rsi
 
 	push rdi
-	mov edi, dword [rcx + SCRINFO_XRES] ; xres
-	mov esi, dword [rcx + SCRINFO_YRES]	; yres
-	mov edx, dword [rcx + SCRINFO_BPP]	; bits per pixel
+	mov edi, dword [rcx + SCRINFO_LINE_LEN] ; line_length
+	mov esi, dword [rcx + SCRINFO_YRES]		; yres
 
 	call get_screen_buffer_size
 	pop r8
@@ -687,36 +700,45 @@ draw_rectangle:
 	push r13
 	push r12
 
-	mov rbp, rdx 	; rbp will hold drawing_ctx ptr
-	mov r14, rsi	; r14 will hold color
-	mov r15, rdi	; r15 will hold rectangle ptr
-	
-	xor r12, r12
-	xor r13, r13
-	
-	mov r12d, dword[r15 + RECT_XPOS]	; current xpos
-	mov r13d, dword[r15 + RECT_YPOS]	; current ypos
+	sub rsp, 16
+	mov qword[rsp], rsi 		; put color on the stack
+	mov qword[rsp + 8], rdx		; put drawing_ctx on the stack
+
+	mov r12d, dword[rdi + RECT_XPOS]	; current xpos
+	mov r13d, dword[rdi + RECT_YPOS]	; current ypos
+
+	mov ebp, r12d	; store the original xpos in ebx
+
+	mov r14d, r12d
+	add r14d, dword[rdi + RECT_WIDTH]	; desired xpos
+	mov r15d, r13d
+	add r15d, dword[rdi + RECT_HEIGHT]	; desired ypos
 	
 	.l_draw_loop:
-		mov rdi, r12		; xpos
-		mov rsi, r13		; ypos
-		mov rdx, r14		; color
-		mov rcx, rbp		; drawing_ctx ptr
+		mov rdi, r12				; xpos
+		mov rsi, r13				; ypos
+		mov rdx, qword[rsp]			; color
+		mov rcx, qword[rsp + 8]		; drawing_ctx ptr
 		call draw_pixel
 
-		; go to next pixel in a row
+		; go to the next pixel in a row
 		add r12d, 1
-		cmp r12d, dword[r15 + RECT_WIDTH]
-		jl .l_loop_condition
+
+		; check if exceeded row length
+		cmp r12d, r14d
+		jl .l_draw_loop
 
 		; if exceeded current row length,
 		; move to the next row
 		add r13d, 1
-		mov r12d, dword[r15 + RECT_XPOS]
+		mov r12d, ebp
 		
 		.l_loop_condition:
-			cmp r13d, dword[r15 + RECT_HEIGHT]
+			cmp r13d, r15d
 			jl .l_draw_loop
+
+	; free stack memory
+	add rsp, 16
 
 	pop r12
 	pop r13
@@ -724,6 +746,159 @@ draw_rectangle:
 	pop r15
 	pop rbp
 
+	ret
+
+
+; Checks if two segments collide.
+; Returns 1 in rax if collision occurs or 0 otherwise.
+; @param edi - beginning of 1st segment
+; @param esi - end of 1st segment
+; @param edx - beginning of 2nd segment 
+; @param ecx - end of 2nd segment
+;
+check_segment_collision:
+	cmp edi, ecx
+	jg .l_no_collision
+	
+	cmp edx, esi
+	jg .l_no_collision
+
+	mov rax, 1
+	ret 
+
+	.l_no_collision:
+		mov rax, 0
+		ret
+
+
+; Checks if two rectangles collide. Returns 1 in rax
+; if the collision occures or 0 otherwise.
+; @param rdi - ptr to first rectangle
+; @param rsi - ptr to second rectangle
+; 
+check_rect_collision:
+	push rbp
+	push r12
+	push r13
+
+	mov rbp, rdi
+	mov r12, rsi
+
+	; rectangles are axis-alligned,
+	; we divide the problem to
+	; segment intersection checks
+	mov edx, dword[rdi + RECT_XPOS]
+	mov ecx, edx
+	mov ecx, dword[rdi + RECT_WIDTH]
+
+	mov esi, dword[rbp + RECT_XPOS]
+	mov edi, esi
+	add edi, dword[rbp + RECT_WIDTH]
+	mov edx, dword[r12 + RECT_XPOS]
+	mov ecx, edx
+	add ecx, dword[r12 + RECT_WIDTH]
+	call check_segment_collision
+
+	cmp rax, 0
+	je .l_return	; early return
+
+	mov esi, dword[rbp + RECT_YPOS]
+	mov edi, esi
+	add edi, dword[rbp + RECT_HEIGHT]
+	mov edx, dword[r12 + RECT_YPOS]
+	mov ecx, edx
+	add ecx, dword[r12 + RECT_HEIGHT]
+	call check_segment_collision
+
+	.l_return:
+		pop r13
+		pop r12
+		pop rbp
+
+		ret
+
+
+; Sets up given player struct
+; @param rdi - ptr to player struct
+; @param rsi - ptr to scr_info
+; @param edx - player_rect_size
+;
+setup_player:
+	mov r8, rdi
+	add r8, PLAYER_RECT
+
+	mov ecx, edx
+	shr ecx, 1
+
+	mov eax, dword[rsi + SCRINFO_XRES]
+	shr eax, 1
+	sub eax, ecx
+
+	mov dword[r8 + RECT_XPOS], eax
+
+	mov eax, dword[rsi + SCRINFO_YRES]
+	shr eax, 1
+	sub eax, ecx
+
+	mov dword[r8 + RECT_YPOS], eax
+	
+	mov dword[r8 + RECT_WIDTH], edx
+	mov dword[r8 + RECT_HEIGHT], edx
+
+	mov dword[rdi + PLAYER_Y_VEL], 0
+
+	ret
+
+
+; Draws the background rectangle
+; @param rdi - ptr to drawing_ctx struct
+; @param rsi - ptr to background rectangle
+;
+draw_background:
+	sub rsp, 8
+
+	mov rdx, rdi
+	mov rdi, rsi
+	mov rsi, COLOR_GREY
+	call draw_rectangle
+
+	add rsp, 8
+	ret
+
+; Draws the player
+; @param rdi - ptr to drawing_ctx struct
+; @param rsi - ptr to player struct
+;
+draw_player:
+	sub rsp, 8
+	add rsi, PLAYER_RECT
+
+	mov rdx, rdi
+	mov rdi, rsi
+	mov rsi, COLOR_YELLOW
+	call draw_rectangle
+
+	add rsp, 8
+	ret
+
+; Draws the main scene.
+; @param rdi - ptr to drawing_ctx struct
+; @param rsi - ptr to player struct
+; @param rdx - ptr to background rectangle
+;
+draw_main_scene:
+	sub rsp, 24
+	mov qword[rsp], rdi
+	mov qword[rsp + 8], rsi
+
+	mov rsi, rdx
+	call draw_background
+
+	mov rdi, qword[rsp]
+	mov rsi, qword[rsp + 8]
+	call draw_player
+
+	add rsp, 24
 	ret
 
 
@@ -858,22 +1033,27 @@ _start:
 	mov rax, qword[framebuffer_ptr]
 	mov qword[drawing_ctx + DRAWINGCTX_FRAMEBUFFER_PTR], rax
 
-	;;
-	; test - setup a rectangle
-	mov dword[rectangle + RECT_XPOS], 0
-	mov dword[rectangle + RECT_YPOS], 0
-	mov dword[rectangle + RECT_WIDTH], 100
-	mov dword[rectangle + RECT_HEIGHT], 100
+	; setup background rectangle
+	mov dword[rect_background + RECT_XPOS], 0
+	mov dword[rect_background + RECT_YPOS], 0
+	mov eax, dword[scr_info + SCRINFO_XRES]
+	mov dword[rect_background + RECT_WIDTH], eax
+	mov eax, dword[scr_info + SCRINFO_YRES]
+	mov dword[rect_background + RECT_HEIGHT], eax
 
-	; test - draw a rectangle
-	mov rdi, rectangle
-	mov rsi, COLOR_BLUE
-	mov rdx, drawing_ctx
-	call draw_rectangle
-	;;
+	; setup the player
+	mov rdi, player
+	mov rsi, scr_info
+	mov edx, dword[const_player_rect_size]
+	call setup_player
 
 	;;;
 	.l_main_loop:
+		mov rdi, drawing_ctx
+		mov rsi, player
+		mov rdx, rect_background
+		call draw_main_scene
+
 		call read_stdin_byte
 
 		cmp rax, KEY_W
