@@ -89,6 +89,8 @@ str_munmap_err			db	'MUNMAP syscall failed - cannot unmap framebuffer from memor
 str_brk_err				db	'BRK syscall failed. Cannot allocate memory!', 0xa, 0
 str_err_code			db	'Error code: %d', 0xa, 0
 
+str_no_blink			db '\033[?12l', 0
+
 file_framebuffer		db	'/dev/fb0', 0
 
 const_player_rect_size	dd	32
@@ -678,6 +680,20 @@ set_stdin_nonblock:
 	ret
 
 
+; Disables cursor blinking in the terminal
+;
+disable_cursor_blink:
+	push rax
+
+	; magic string - standard control sequence to turn off cursor blinking on terminals
+	mov rdi, str_no_blink
+	xor eax, eax
+	call printf
+
+	pop rax
+	ret
+
+
 ; Reads a single byte from stdin and returns it in rax.
 ; When stdin is set to NONBLOCKING, it may return -11 (EAGAIN)
 ; if there are no bytes ready to be read at the moment.
@@ -1138,6 +1154,9 @@ _start:
 	; set the NONBLOCKING flag for stdin
 	mov rdi, 1
 	call set_stdin_nonblock
+
+	; disable cursor blinking in the terminal
+	call disable_cursor_blink
 
 	; setup the drawing context
 	mov qword[drawing_ctx + DRAWINGCTX_SCR_INFO], scr_info
