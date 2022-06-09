@@ -55,9 +55,11 @@ rect_background		resb 	16
 
 ; Player struct:
 ; player_rect : rectangle
-; y_velocity : dw
+; x_pos : dw (float)
+; y_pos : dw (float)
+; y_velocity : dw (float)
 ;
-player				resb	20
+player				resb	28
 
 ; Physics context struct:
 ; gravity_acc : dw (float)
@@ -119,11 +121,16 @@ SYS_MUNMAP		equ 11
 SYS_BRK			equ 12
 SYS_IOCTL		equ 16
 SYS_EXIT		equ 60
+SYS_FCNTL		equ 72
 SYS_TIME		equ 201
 
 O_RDONLY    	equ 0
 O_WRONLY		equ 1
 O_RDWR			equ 2
+O_NONBLOCK		equ 2048
+
+F_GETFL			equ 3
+F_SETFL			equ 4
 
 FBIOGET_VSCREENINFO	equ 0x4600
 FBIOGET_FSCREENINFO	equ 0x4602
@@ -158,7 +165,9 @@ RECT_WIDTH					equ 8
 RECT_HEIGHT					equ 12
 
 PLAYER_RECT					equ 0
-PLAYER_Y_VEL				equ 16
+PLAYER_X_POS				equ 16
+PLAYER_Y_POS				equ 20
+PLAYER_Y_VEL				equ 24
 
 PROT_READ	equ 1
 PROT_WRITE	equ 2
@@ -635,13 +644,49 @@ set_echo_flag:
 	ret
 
 
-; Reads a single byte from stdin and returns it in rax
+; Sets the O_NONBLOCK flag on stdin
+; @param rdi - value to set the flag to: 0 for false, non-zero for true
+;
+set_stdin_nonblock:
+	push rdi
+
+	; get current flags
+	mov rax, SYS_FCNTL
+	mov rdi, fd_stdin
+	mov rsi, F_GETFL
+	syscall
+
+	pop rcx
+
+	cmp rcx, 0
+	je .l_unset_flag
+
+	or rax, O_NONBLOCK
+	jmp .l_store_flags
+
+	.l_unset_flag:
+		and rax, ~O_NONBLOCK
+	
+	; save the modified flags
+	.l_store_flags:
+		mov rdx, rax
+		mov rax, SYS_FCNTL
+		mov rdi, fd_stdin
+		mov rsi, F_SETFL
+		syscall
+
+	ret
+
+
+; Reads a single byte from stdin and returns it in rax.
+; When stdin is set to NONBLOCKING, it may return -11 (EAGAIN)
+; if there are no bytes ready to be read at the moment.
 ;
 read_stdin_byte:
 	sub         rsp, 8			; allocate 8-byte space on the stack as read buffer
 	
-	mov         rax, SYS_READ	; set SYS_READ as SYS_CALL value
-	mov         rdi, fd_stdin	; set rdi to 0 to indicate a STDIN file descriptor
+	mov         rax, SYS_READ
+	mov         rdi, fd_stdin
 	lea         rsi, [rsp]		; set const char *buf to the 8-byte space on stack
 	mov         rdx, 1			; set size_t count to 1 for one char
 	syscall
@@ -824,6 +869,23 @@ check_rect_collision:
 		ret
 
 
+; Translates a rectangle by a given (x, y) vector.
+; @param rdi - ptr to rectangle
+; @param esi - x
+; @param edx - y
+;
+translate_rect:
+	mov eax, dword[rdi + RECT_XPOS]
+	add eax, esi
+	mov dword[rdi + RECT_XPOS], eax
+
+	mov eax, dword[rdi + RECT_YPOS]
+	add eax, edx
+	mov dword[rdi + RECT_YPOS], eax
+
+	ret
+
+
 ; Sets up given player struct
 ; @param rdi - ptr to player struct
 ; @param rsi - ptr to scr_info
@@ -851,7 +913,9 @@ setup_player:
 	mov dword[r8 + RECT_WIDTH], edx
 	mov dword[r8 + RECT_HEIGHT], edx
 
-	mov dword[rdi + PLAYER_Y_VEL], 0
+	mov dword[rdi + PLAYER_X_POS], __float32__(0.0)
+	mov dword[rdi + PLAYER_Y_POS], __float32__(0.0)
+	mov dword[rdi + PLAYER_Y_VEL], __float32__(0.0)
 
 	ret
 
@@ -918,12 +982,28 @@ setup_physics:
 
 
 ; Simulates the player position based on received delta time.
-; @param rsi - ptr to player struct
-; @param rdi - ptr to physics context struct
+; @param rdi - ptr to player struct
+; @param rsi - ptr to physics context struct
 ; @param rdx - delta time
 ;
 simulate_player:
+	push rbp
+	mov rbp, rdi
+
+	; update velocity
+	;movd xmm0, dword[rbp + PLAYER_Y_VEL]
+
+	; update position
+	mov rdi, rbp
+	add rdi, PLAYER_RECT
+	mov esi, 1
+	mov edx, 1
+	call translate_rect
+
+	pop rbp
+
 	ret
+
 
 ; Does the cleanup and exits the program with given code.
 ; @param rdi - exit code
@@ -981,6 +1061,10 @@ exit:
 	; and set echo flag back in terminal params
 	mov rdi, 1
 	call set_echo_flag
+
+	; and remove the NONBLOCKING flag from stdin
+	mov rdi, 0
+	call set_stdin_nonblock
 
 	; quit program
 	.l_quit:
@@ -1050,6 +1134,10 @@ _start:
 	; also disable the echo in the terminal
 	xor rdi, rdi
 	call set_echo_flag
+
+	; set the NONBLOCKING flag for stdin
+	mov rdi, 1
+	call set_stdin_nonblock
 
 	; setup the drawing context
 	mov qword[drawing_ctx + DRAWINGCTX_SCR_INFO], scr_info
