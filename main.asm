@@ -22,13 +22,13 @@ section		.bss
 ; bits_per_pixel : dw
 ; line_length : dw
 ;
-scr_info			resb	24
+scr_info			resb	SIZEOF_SCR_INFO
 
 ; Drawing context struct:
 ; screen_info_ptr : qw
 ; framebuffer_ptr : qw
 ;
-drawing_ctx			resb 	16
+drawing_ctx			resb 	SIZEOF_DRAWING_CTX
 
 ; Termios struct representation
 ;
@@ -43,7 +43,7 @@ drawing_ctx			resb 	16
 ;
 ; where sizeof(tcflag_) = 4 and sizeof(cc_t) = 1
 ;
-termios				resb	36
+termios				resb	SIZEOF_TERMIOS
 
 ; Rectangle struct:
 ; xpos : dw
@@ -51,22 +51,32 @@ termios				resb	36
 ; width : dw
 ; height : dw
 ;
-rect_background		resb 	16
+rect_background		resb 	SIZEOF_RECT
 
 ; Player struct:
 ; player_rect : rectangle
 ; y_pos : dw (float)
 ; y_velocity : dw (float)
 ;
-player				resb	24
+player				resb	SIZEOF_PLAYER
+
+; Obstacle struct:
+; rect : rectangle
+; x_pos : dw (float)
+;
+; Here's a static array that holds
+; all obstacles present on the screen:
+;
+obstacles_arr		resb	OBSTACLES_SIZE * SIZEOF_OBSTACLE
 
 ; Physics context struct:
 ; gravity_acc : dw (float)
 ; jump_vel : dw (float)
 ; time_coeff : dw (float)
 ; acc_tune : dw (float)
+; map_scroll_vel : dw (float)
 ;
-physics_ctx			resb	16
+physics_ctx			resb	SIZEOF_PHYSICS_CTX
 
 ; Timeval struct representation:
 ;
@@ -107,6 +117,7 @@ str_dbg_d				db '%d', 0xa, 0
 file_framebuffer		db	'/dev/fb0', 0
 
 const_player_rect_size	dd	32
+const_obstacle_width	dd	32
 
 ; ===== DATA SECTION =====
 
@@ -117,6 +128,8 @@ ticks_since_keypress_space	db	KEYPRESS_COOLDOWN
 ticks_since_keypress_q		db	KEYPRESS_COOLDOWN
 
 time_since_last_jump 		dq	JUMP_COOLDOWN
+
+obstacles_top_index			db	0
 
 ; ----- Pointers -----
 
@@ -184,6 +197,7 @@ PHYSCTX_GRAVITY_ACC			equ 0
 PHYSCTX_JUMP_VEL			equ 4
 PHYSCTX_TIME_COEFF			equ 8
 PHYSCTX_ACC_TUNE			equ 12
+PHYSCTX_MAP_SCROLL_VEL		equ 16
 
 RECT_XPOS					equ 0
 RECT_YPOS					equ 4
@@ -193,6 +207,9 @@ RECT_HEIGHT					equ 12
 PLAYER_RECT					equ 0
 PLAYER_Y_POS				equ 16
 PLAYER_Y_VEL				equ 20
+
+OBSTACLE_RECT				equ 0
+OBSTACLE_X_POS				equ 16
 
 PROT_READ					equ 1
 PROT_WRITE					equ 2
@@ -212,6 +229,16 @@ TIMEVAL_USEC				equ 8
 ZF_MASK						equ 0x0040
 ZF_MASK_SHIFT				equ 6
 
+; ----- Sizeofs -----
+SIZEOF_SCR_INFO				equ 24
+SIZEOF_DRAWING_CTX			equ 16
+SIZEOF_TERMIOS				equ 36
+SIZEOF_RECT					equ 16
+SIZEOF_PLAYER				equ 24
+SIZEOF_OBSTACLE				equ 20
+SIZEOF_PHYSICS_CTX			equ 20
+SIZEOF_TIMEVAL				equ 16
+
 ; ----- Key codes -----
 KEY_SPACE	equ	32
 KEY_Q		equ 113
@@ -229,6 +256,11 @@ COLOR_YELLOW	equ 0x00ffff00
 ; ----- Cooldowns -----
 JUMP_COOLDOWN		equ	100000	; microseconds
 KEYPRESS_COOLDOWN	equ	8		; ticks
+
+; ----- Gameplay -----
+OBSTACLES_SIZE			equ 10
+MIN_OBSTACLE_HEIGHT		equ 128
+MAX_OBSTACLE_HEIGHT		equ 256
 
 ; ===== TEXT SECTION =====
 
@@ -277,7 +309,7 @@ get_sys_time:
 ;
 get_time_usec:
 	; reserve space for timeval struct on the stack
-	sub rsp, 16
+	sub rsp, SIZEOF_TIMEVAL
 	; GetTimeOfDay syscall will return timeval struct as a result
 	mov rax, SYS_GETTIMEOFDAY
 	mov rdi, rsp
@@ -288,7 +320,7 @@ get_time_usec:
 	cmp rax, 0
 	je .l_return
 
-	add rsp, 16
+	add rsp, SIZEOF_TIMEVAL
 
 	push rax
 	mov rdi, str_err_code
@@ -309,7 +341,7 @@ get_time_usec:
 		shl rax, 6	
 
 		add rax, qword[rsp + TIMEVAL_USEC]
-		add rsp, 16
+		add rsp, SIZEOF_TIMEVAL
 		ret
 	
 
@@ -1067,15 +1099,58 @@ draw_player:
 	ret
 
 
+; Draws all the obstacles
+; @param rdi - ptr to drawing_ctx struct
+; @param rsi - ptr to an array of obstacles
+; @param rdx - ptr tp current top index of obsatcle array
+;
+draw_obstacles:
+	push rbp
+	push r12
+	push r13
+	
+	mov rbp, rdi
+	mov r12, rsi
+	movzx r13, byte[rdx]
+
+	.l_draw_loop:
+		cmp r13, 0
+		je .l_return
+		sub r13, 1
+
+		mov rax, r13
+		mov rcx, SIZEOF_OBSTACLE
+		mul rcx
+		add rax, r12
+		add rax, OBSTACLE_RECT
+
+		mov rdi, rax
+		mov rsi, COLOR_BLUE
+		mov rdx, rbp
+		call draw_rectangle
+
+		jmp .l_draw_loop
+
+	.l_return:
+		pop r13
+		pop r12
+		pop rbp
+		ret
+
+
 ; Draws the main scene.
 ; @param rdi - ptr to drawing_ctx struct
 ; @param rsi - ptr to player struct
 ; @param rdx - ptr to background rectangle
+; @param rcx - ptr to obstacles struct
+; @param r8 - ptr to obstacles top index
 ;
 draw_main_scene:
-	sub rsp, 24
+	sub rsp, 40
 	mov qword[rsp], rdi
 	mov qword[rsp + 8], rsi
+	mov qword[rsp + 16], rcx
+	mov qword[rsp + 24], r8
 
 	mov rsi, rdx
 	call draw_background
@@ -1084,7 +1159,12 @@ draw_main_scene:
 	mov rsi, qword[rsp + 8]
 	call draw_player
 
-	add rsp, 24
+	mov rdi, qword[rsp]
+	mov rsi, qword[rsp + 16]
+	mov rdx, qword[rsp + 24]
+	call draw_obstacles
+
+	add rsp, 40
 	ret
 
 
@@ -1096,6 +1176,7 @@ setup_physics:
 	mov dword[rdi + PHYSCTX_JUMP_VEL], __float32__(250.0)
 	mov dword[rdi + PHYSCTX_TIME_COEFF], __float32__(0.000001)
 	mov dword[rdi + PHYSCTX_ACC_TUNE], __float32__(40.0)
+	mov dword[rdi + PHYSCTX_MAP_SCROLL_VEL], __float32__(100.0)
 	ret
 
 
@@ -1156,6 +1237,67 @@ player_jump:
 	fstp dword[rdi + PLAYER_Y_VEL]
 
 	ret
+
+
+; Simulates obstacles movement based on received delta time.
+; @param rdi - ptr to obstacles struct
+; @param rsi - ptr to current obstacles top index 
+; @param rdx - ptr to physics context struct
+; @param rcx - delta time
+;
+simulate_obstacles:	
+	push r12
+	push r13
+
+	sub rsp, 24							; reserve space on stack
+	mov qword[rsp + 8], rdx				; store ptr to physics context
+	mov qword[rsp], rcx					; store delta time
+
+	mov r12, rdi						; put ptr to obstacle arr into r12
+	movzx r13, byte[rsi]				; put obstacle top index into r13
+
+	; adjust the time
+	fild qword[rsp]
+	fld dword[rdx + PHYSCTX_TIME_COEFF]
+	fmulp
+	fstp qword[rsp]
+
+	; update obstacles
+	.l_update_loop:
+		cmp r13, 0
+		je .l_return
+		sub r13, 1
+
+		mov rax, r13
+		mov rcx, SIZEOF_OBSTACLE
+		mul rcx
+		add rax, r12
+
+		mov rdx, qword[rsp + 8]
+		
+		; update displacement
+		fld dword[rax + OBSTACLE_X_POS]					; push x
+		fld dword[rdx + PHYSCTX_MAP_SCROLL_VEL]			; push v
+		fld qword[rsp]									; push t
+		fmulp											; v * t
+		fsubp											; x -= v * t
+		fst dword[rax + OBSTACLE_X_POS]					; save new x_pos
+		fistp dword[rsp + 16]							; cast to integer and store
+
+		; set rectangle position
+		add rax, OBSTACLE_RECT
+		mov rdi, rax
+		mov esi, dword[rsp + 16]
+		mov edx, dword[rax + RECT_YPOS]
+		call set_rect_pos
+
+		jmp .l_update_loop
+
+	.l_return:
+		add rsp, 24
+		pop r13
+		pop r12
+		ret
 
 
 ; Updates the delta frame and last frame timestamp.
@@ -1281,6 +1423,106 @@ quit_action:
 	; exit normally
 	mov rdi, 0
 	jmp exit	; tailcall
+
+
+; Generated new random obstacle and saves it under given pointer
+; @param rdi - ptr to the space allocated for the new obstacle
+; @param rsi - ptr to scr_info struct
+;
+generate_random_obstacle:
+	push r12
+	push r13
+	sub rsp, 8
+
+	mov r12, rdi
+	mov r13, rsi
+
+	mov edi, MIN_OBSTACLE_HEIGHT
+	mov esi, MAX_OBSTACLE_HEIGHT
+	mov rdx, prng_seed
+	call get_rand_int
+	mov dword[rsp], eax
+
+	mov edi, 0
+	mov esi, 2
+	mov rdx, prng_seed
+	call get_rand_int
+	mov dword[rsp + 4], eax
+
+	mov eax, dword[const_obstacle_width]
+	mov dword[r12 + OBSTACLE_RECT + RECT_WIDTH], eax
+	mov eax, dword[rsp]
+	mov dword[r12 + OBSTACLE_RECT + RECT_HEIGHT], eax
+
+	mov eax, dword[r13 + SCRINFO_XRES]
+	sub eax, dword[r12 + OBSTACLE_RECT + RECT_WIDTH]
+	mov dword[r12 + OBSTACLE_RECT + RECT_XPOS], eax
+
+	mov eax, dword[r13 + SCRINFO_YRES]
+	sub eax, dword[r12 + OBSTACLE_RECT + RECT_HEIGHT]
+	mov dword[r12 + OBSTACLE_RECT + RECT_YPOS], eax
+
+	fild dword[r12 + OBSTACLE_RECT + RECT_XPOS]
+	fstp dword[r12 + OBSTACLE_X_POS]
+
+	add rsp, 8
+	pop r13
+	pop r12
+	ret
+
+
+; Adds new random obstacle to the given array (if there's space for it).
+; @param rdi - ptr to static array of obstacles
+; @param rsi - ptr to current top index of obstacles array
+; @param rdx - obstacles array size
+; @param rcx - ptr to scr_info struct
+;
+add_random_obstacle:
+	movzx rax, byte[rsi]
+	add rax, 1
+
+	cmp rax, rdx
+	jb .l_sanity_check_ok
+	ret
+
+	.l_sanity_check_ok:
+		push rcx
+		
+		movzx rax, byte[rsi]
+		mov rcx, rax
+		add rcx, 1
+		mov byte[rsi], cl
+
+		mov rcx, SIZEOF_OBSTACLE
+		mul rcx
+		add rax, rdi
+
+		mov rdi, rax
+		mov rsi, qword[rsp]
+		call generate_random_obstacle
+		add rsp, 8
+	
+	ret
+
+
+; Returns ptr to the element of static array.
+; If element is out of bounds, then it returns nullptr.
+; @param rdi - index of the element
+; @param rsi - ptr to the array
+; @param rdx - size of element
+; @param rcx - size of array for sanity check
+;
+get_element:
+	cmp rdi, rcx
+	jb .l_sanity_check_ok
+	mov rax, 0
+	ret
+
+	.l_sanity_check_ok:
+		mov rax, rdi
+		mul rdx
+		add rax, rsi
+		ret
 
 
 ; Does the cleanup and exits the program with given code.
@@ -1450,6 +1692,14 @@ _start:
 	mov qword[rsp], rax		; last frame time
 	mov qword[rsp + 8], 0	; delta frame time
 
+	;;
+	mov rdi, obstacles_arr
+	mov rsi, obstacles_top_index
+	mov rdx, OBSTACLES_SIZE
+	mov rcx, scr_info
+	call add_random_obstacle
+	;;
+
 	;;;
 	.l_main_loop:
 		; update time
@@ -1469,10 +1719,19 @@ _start:
 		mov rdx, qword[rsp + 8]
 		call simulate_player
 
+		; update obstacles
+		mov rdi, obstacles_arr
+		mov rsi, obstacles_top_index
+		mov rdx, physics_ctx
+		mov rcx, qword[rsp + 8]
+		call simulate_obstacles
+
 		; draw the scene
 		mov rdi, drawing_ctx
 		mov rsi, player
 		mov rdx, rect_background
+		mov rcx, obstacles_arr
+		mov r8, obstacles_top_index
 		call draw_main_scene
 
 		; read user input
