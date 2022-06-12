@@ -1020,6 +1020,72 @@ check_rect_collision:
 		ret
 
 
+; Returns 1 in rax if given rectangle is within the screen borders (fully).
+; @param rdi - ptr to the rectangle
+; @param rsi - ptr to scr_info struct
+;
+is_on_screen_fully:
+	mov ecx, dword[rsi + SCRINFO_XRES]
+	mov edx, dword[rsi + SCRINFO_YRES]
+	
+	mov eax, dword[rdi + RECT_XPOS]
+	cmp eax, 0
+	jl .l_out_of_borders
+
+	add eax, dword[rdi + RECT_WIDTH]
+	cmp eax, ecx
+	jge .l_out_of_borders
+
+	mov eax, dword[rdi + RECT_YPOS]
+	cmp eax, 0
+	jl .l_out_of_borders
+
+	add eax, dword[rdi + RECT_HEIGHT]
+	cmp eax, ecx
+	jge .l_out_of_borders
+
+	mov rax, 1
+	ret
+
+	.l_out_of_borders:
+		xor rax, rax
+		ret
+
+
+;
+;
+; Returns 1 in rax if given rectangle or any part of it is visible on the screen.
+; @param rdi - ptr to the rectangle
+; @param rsi - ptr to scr_info struct
+;
+is_on_screen:
+	mov ecx, dword[rsi + SCRINFO_XRES]
+	mov edx, dword[rsi + SCRINFO_YRES]
+	
+	mov eax, dword[rdi + RECT_XPOS]
+	cmp eax, ecx
+	jge .l_out_of_borders
+
+	add eax, dword[rdi + RECT_WIDTH]
+	cmp eax, 0
+	jl .l_out_of_borders
+
+	mov eax, dword[rdi + RECT_YPOS]
+	cmp eax, edx
+	jge .l_out_of_borders
+
+	add eax, dword[rdi + RECT_HEIGHT]
+	cmp eax, 0
+	jl .l_out_of_borders
+
+	mov rax, 1
+	ret
+
+	.l_out_of_borders:
+		xor rax, rax
+		ret
+
+
 ; Sets the posiiton of a rectangle to given (x, y) coordinates.
 ; @param rdi - ptr to rectangle
 ; @param esi - x
@@ -1244,12 +1310,14 @@ player_jump:
 ; @param rsi - ptr to current obstacles top index 
 ; @param rdx - ptr to physics context struct
 ; @param rcx - delta time
+; @param r8 - ptr to scr_info struct
 ;
 simulate_obstacles:	
 	push r12
 	push r13
 
-	sub rsp, 24							; reserve space on stack
+	sub rsp, 40							; reserve space on stack
+	mov qword[rsp + 16], r8				; store ptr to scr_info
 	mov qword[rsp + 8], rdx				; store ptr to physics context
 	mov qword[rsp], rcx					; store delta time
 
@@ -1273,7 +1341,8 @@ simulate_obstacles:
 		mul rcx
 		add rax, r12
 
-		mov rdx, qword[rsp + 8]
+		mov qword[rsp + 32], rax 						; save ptr to current obstacle
+		mov rdx, qword[rsp + 8]							; put ptr to physics_ctx into rdx
 		
 		; update displacement
 		fld dword[rax + OBSTACLE_X_POS]					; push x
@@ -1282,19 +1351,32 @@ simulate_obstacles:
 		fmulp											; v * t
 		fsubp											; x -= v * t
 		fst dword[rax + OBSTACLE_X_POS]					; save new x_pos
-		fistp dword[rsp + 16]							; cast to integer and store
+		fistp dword[rsp + 24]							; cast to integer and store
 
 		; set rectangle position
+		mov esi, dword[rsp + 24]
 		add rax, OBSTACLE_RECT
 		mov rdi, rax
-		mov esi, dword[rsp + 16]
 		mov edx, dword[rax + RECT_YPOS]
 		call set_rect_pos
+
+		mov rdi, qword[rsp + 32]						; ptr to obstacle
+		add rdi, OBSTACLE_RECT							; make it point to rectangle
+		mov rsi, qword[rsp + 16]						; ptr to scr_info
+		call is_on_screen
+
+		cmp rax, 1
+		je .l_update_loop
+
+		; "regenerate" the old obastcle
+		mov rdi, qword[rsp + 32]						; ptr to the old obstacle
+		mov rsi, qword[rsp + 16]						; ptr to scr_info
+		call generate_random_obstacle
 
 		jmp .l_update_loop
 
 	.l_return:
-		add rsp, 24
+		add rsp, 40
 		pop r13
 		pop r12
 		ret
@@ -1454,8 +1536,10 @@ generate_random_obstacle:
 	mov eax, dword[rsp]
 	mov dword[r12 + OBSTACLE_RECT + RECT_HEIGHT], eax
 
+	; put the new obstacle behind the right border of the screen
 	mov eax, dword[r13 + SCRINFO_XRES]
-	sub eax, dword[r12 + OBSTACLE_RECT + RECT_WIDTH]
+	; but also make it bearly visible:
+	sub eax, 1
 	mov dword[r12 + OBSTACLE_RECT + RECT_XPOS], eax
 
 	mov eax, dword[r13 + SCRINFO_YRES]
@@ -1724,6 +1808,7 @@ _start:
 		mov rsi, obstacles_top_index
 		mov rdx, physics_ctx
 		mov rcx, qword[rsp + 8]
+		mov r8, scr_info
 		call simulate_obstacles
 
 		; draw the scene
