@@ -55,17 +55,25 @@ rect_background		resb 	16
 
 ; Player struct:
 ; player_rect : rectangle
-; x_pos : dw (float)
 ; y_pos : dw (float)
 ; y_velocity : dw (float)
 ;
-player				resb	28
+player				resb	24
 
 ; Physics context struct:
 ; gravity_acc : dw (float)
 ; jump_vel : dw (float)
+; time_coeff : dw (float)
 ;
-physics_ctx			resb	8
+physics_ctx			resb	12
+
+; Timeval struct representation:
+;
+; struct timeval {
+; 	time_t      tv_sec;     /* seconds */
+; 	suseconds_t tv_usec;    /* microseconds */
+; };
+; 
 
 ; ----- Variables -----
 
@@ -87,9 +95,13 @@ str_ioctl_tcsets_err	db	'IOCTL syscall failed when setting terminal parameters!'
 str_mmap_err			db	'MMAP syscall failed - cannot map framebuffer into memory!', 0xa, 0
 str_munmap_err			db	'MUNMAP syscall failed - cannot unmap framebuffer from memory!', 0xa, 0
 str_brk_err				db	'BRK syscall failed. Cannot allocate memory!', 0xa, 0
+str_gettimeofday_err	db	'GETTIMEOFDAY syscall failed!', 0xa, 0
 str_err_code			db	'Error code: %d', 0xa, 0
 
 str_no_blink			db '\033[?12l', 0
+
+str_dbg_f				db '%f', 0xa, 0
+str_dbg_d				db '%d', 0xa, 0
 
 file_framebuffer		db	'/dev/fb0', 0
 
@@ -115,24 +127,25 @@ fd_framebuffer		dd	-1
 prng_seed		dd	0
 
 ; ----- Equate Directives -----
-SYS_READ		equ 0
-SYS_OPEN    	equ 2
-SYS_CLOSE		equ 3
-SYS_MMAP		equ 9
-SYS_MUNMAP		equ 11
-SYS_BRK			equ 12
-SYS_IOCTL		equ 16
-SYS_EXIT		equ 60
-SYS_FCNTL		equ 72
-SYS_TIME		equ 201
+SYS_READ			equ 0
+SYS_OPEN    		equ 2
+SYS_CLOSE			equ 3
+SYS_MMAP			equ 9
+SYS_MUNMAP			equ 11
+SYS_BRK				equ 12
+SYS_IOCTL			equ 16
+SYS_EXIT			equ 60
+SYS_FCNTL			equ 72
+SYS_GETTIMEOFDAY	equ 96
+SYS_TIME			equ 201
 
-O_RDONLY    	equ 0
-O_WRONLY		equ 1
-O_RDWR			equ 2
-O_NONBLOCK		equ 2048
+O_RDONLY    		equ 0
+O_WRONLY			equ 1
+O_RDWR				equ 2
+O_NONBLOCK			equ 2048
 
-F_GETFL			equ 3
-F_SETFL			equ 4
+F_GETFL				equ 3
+F_SETFL				equ 4
 
 FBIOGET_VSCREENINFO	equ 0x4600
 FBIOGET_FSCREENINFO	equ 0x4602
@@ -160,6 +173,7 @@ DRAWINGCTX_FRAMEBUFFER_PTR	equ 8
 
 PHYSCTX_GRAVITY_ACC			equ 0
 PHYSCTX_JUMP_VEL			equ 4
+PHYSCTX_TIME_COEFF			equ 8
 
 RECT_XPOS					equ 0
 RECT_YPOS					equ 4
@@ -167,26 +181,29 @@ RECT_WIDTH					equ 8
 RECT_HEIGHT					equ 12
 
 PLAYER_RECT					equ 0
-PLAYER_X_POS				equ 16
-PLAYER_Y_POS				equ 20
-PLAYER_Y_VEL				equ 24
+PLAYER_Y_POS				equ 16
+PLAYER_Y_VEL				equ 20
 
-PROT_READ	equ 1
-PROT_WRITE	equ 2
+PROT_READ					equ 1
+PROT_WRITE					equ 2
 
-MAP_SHARED	equ 1
+MAP_SHARED					equ 1
 
-MAP_FAILED	equ -1
+MAP_FAILED					equ -1
 
-TCGETS		equ 0x5401
-TCSETS		equ 0x5402
-ICANON		equ 2
-ECHO		equ 8
+TCGETS						equ 0x5401
+TCSETS						equ 0x5402
+ICANON						equ 2
+ECHO						equ 8
+
+TIMEVAL_SEC					equ 0
+TIMEVAL_USEC				equ 8
 
 ; ----- Key codes -----
 KEY_SPACE	equ	32
-KEY_W		equ 119
+KEY_Q		equ 113
 KEY_S		equ	115
+KEY_W		equ 119
 
 ; ----- Colors -----
 COLOR_RED		equ 0x00ff0000
@@ -227,7 +244,8 @@ quit_with_error:
 	jmp exit		; tailcall
 
 
-; Returns system time in rax; used mainly as seed for prng
+; Returns system time in rax - number of seconds since 1970;
+; used mainly as seed for prng
 ; 
 get_sys_time:
 	; We use system call sys_time,
@@ -237,6 +255,46 @@ get_sys_time:
         syscall
 	ret
 
+
+; Returns current time in microseconds in rax.
+;
+get_time_usec:
+	; reserve space for timeval struct on the stack
+	sub rsp, 16
+	; GetTimeOfDay syscall will return timeval struct as a result
+	mov rax, SYS_GETTIMEOFDAY
+	mov rdi, rsp
+	mov rsi, 0
+	syscall
+
+	; check for errors
+	cmp rax, 0
+	je .l_return
+
+	add rsp, 16
+
+	push rax
+	mov rdi, str_err_code
+	mov rsi, rax
+	xor eax, eax
+	call printf
+	pop rax
+
+	mov rdi, str_gettimeofday_err
+	jmp quit_with_error ; tailcall
+
+	.l_return:
+		; convert seconds to microseconds
+		; by multiplying them by 1,000,000
+		mov rax, qword[rsp + TIMEVAL_SEC]
+		mov rcx, 15625
+		mul rcx							
+		shl rax, 6	
+
+		add rax, qword[rsp + TIMEVAL_USEC]
+		add rsp, 16
+		ret
+	
 
 ; Returns pseudo random 32-bit integer in eax
 ; @param edi - lower boundary (inclusive)
@@ -703,56 +761,84 @@ read_stdin_byte:
 	
 	mov         rax, SYS_READ
 	mov         rdi, fd_stdin
-	lea         rsi, [rsp]		; set const char *buf to the 8-byte space on stack
+	mov         rsi, rsp		; set const char *buf to the 8-byte space on stack
 	mov         rdx, 1			; set size_t count to 1 for one char
 	syscall
 
-	movzx rax, byte[rsp]
-	add rsp, 8
+	cmp rax, -11
+	je .l_return
 
-	ret
+	movzx rax, byte[rsp]
+	
+	.l_return:
+		add rsp, 8
+		ret
 
 
 ; Draws a single pixel on the frame buffer
-; @param rdi - xpos
-; @param rsi - ypos
+; @param edi - xpos
+; @param esi - ypos
 ; @param rdx - color (4 byte, BGRA format)
 ; @param rcx - ptr to drawing_ctx struct
 ;
 draw_pixel:
-	push rdx
-	push rsi
-	push rdi
+	push rbp
+	push r12
+	push r13
 
-	mov rdi, qword[rcx + DRAWINGCTX_FRAMEBUFFER_PTR]
-	mov rsi, qword[rcx + DRAWINGCTX_SCR_INFO]
+	mov rbp, qword[rcx + DRAWINGCTX_SCR_INFO]
 
-	mov ecx, dword[rsi + SCRINFO_XOFFSET]	; xoffset
-	mov edx, dword[rsi + SCRINFO_YOFFSET]	; yoffset
-	mov r8d, dword[rsi + SCRINFO_BPP]		; bits per pixel
-	shr r8d, 3								; make it bytes per pixel
-	mov r9d, dword[rsi + SCRINFO_LINE_LEN]	; line_length
+	; sanity checks
+	cmp edi, 0
+	jl .l_sanity_check_failed
+	cmp edi, dword[rbp + SCRINFO_XRES]
+	jge .l_sanity_check_failed
 
-	; rsi := (x + xoffset) * bytes_per_pixel
-	pop rax
-	add eax, ecx
-	mul r8d
-	mov esi, eax
+	cmp esi, 0
+	jl .l_sanity_check_failed
+	cmp esi, dword[rbp + SCRINFO_YRES]
+	jge .l_sanity_check_failed
 
-	; rax := (y + yoffset) * line_length
-	pop rax
-	add eax, edx
-	mul r9d
+	jmp .l_sanity_check_ok
 
-	; rax will store calculated location of pixel data
-	add rax, rsi
-	add rax, rdi
+	.l_sanity_check_failed:
+		pop r13
+		pop r12
+		pop rbp
+		ret
 
-	; set color
-	pop rcx
-	mov qword[rax], rcx
+	.l_sanity_check_ok:
+		mov r12, qword[rcx + DRAWINGCTX_FRAMEBUFFER_PTR]
+		mov r13, rdx
 
-	ret
+		mov ecx, dword[rbp + SCRINFO_XOFFSET]	; xoffset
+		mov edx, dword[rbp + SCRINFO_YOFFSET]	; yoffset
+		mov r8d, dword[rbp + SCRINFO_BPP]		; bits per pixel
+		shr r8d, 3								; make it bytes per pixel
+		mov r9d, dword[rbp + SCRINFO_LINE_LEN]	; line_length
+
+		; ecx := (x + xoffset) * bytes_per_pixel
+		mov eax, edi
+		add eax, ecx
+		mul r8d
+		mov ecx, eax
+
+		; eax := (y + yoffset) * line_length
+		mov eax, esi
+		add eax, edx
+		mul r9d
+
+		; rax will store calculated location of pixel data
+		add rax, rcx
+		add rax, r12
+
+		; set color
+		mov qword[rax], r13
+
+		pop r13
+		pop r12
+		pop rbp
+		ret
 
 
 ; Draws a rectangle on a framebuffer
@@ -885,19 +971,14 @@ check_rect_collision:
 		ret
 
 
-; Translates a rectangle by a given (x, y) vector.
+; Sets the posiiton of a rectangle to given (x, y) coordinates.
 ; @param rdi - ptr to rectangle
 ; @param esi - x
 ; @param edx - y
 ;
-translate_rect:
-	mov eax, dword[rdi + RECT_XPOS]
-	add eax, esi
-	mov dword[rdi + RECT_XPOS], eax
-
-	mov eax, dword[rdi + RECT_YPOS]
-	add eax, edx
-	mov dword[rdi + RECT_YPOS], eax
+set_rect_pos:
+	mov dword[rdi + RECT_XPOS], esi
+	mov dword[rdi + RECT_YPOS], edx
 
 	ret
 
@@ -926,11 +1007,11 @@ setup_player:
 
 	mov dword[r8 + RECT_YPOS], eax
 	
+	fild dword[r8 + RECT_YPOS]
+	fstp dword[rdi + PLAYER_Y_POS]
+
 	mov dword[r8 + RECT_WIDTH], edx
 	mov dword[r8 + RECT_HEIGHT], edx
-
-	mov dword[rdi + PLAYER_X_POS], __float32__(0.0)
-	mov dword[rdi + PLAYER_Y_POS], __float32__(0.0)
 	mov dword[rdi + PLAYER_Y_VEL], __float32__(0.0)
 
 	ret
@@ -951,6 +1032,7 @@ draw_background:
 	add rsp, 8
 	ret
 
+
 ; Draws the player
 ; @param rdi - ptr to drawing_ctx struct
 ; @param rsi - ptr to player struct
@@ -966,6 +1048,7 @@ draw_player:
 
 	add rsp, 8
 	ret
+
 
 ; Draws the main scene.
 ; @param rdi - ptr to drawing_ctx struct
@@ -994,6 +1077,7 @@ draw_main_scene:
 setup_physics:
 	mov dword[rdi + PHYSCTX_GRAVITY_ACC], __float32__(9.81)
 	mov dword[rdi + PHYSCTX_JUMP_VEL], __float32__(10.0)
+	mov dword[rdi + PHYSCTX_TIME_COEFF], __float32__(0.000001)
 	ret
 
 
@@ -1003,20 +1087,41 @@ setup_physics:
 ; @param rdx - delta time
 ;
 simulate_player:
-	push rbp
-	mov rbp, rdi
+	sub rsp, 16							; reserve space on stack
+	mov qword[rsp], rdx					; store delta time
+	
+	; adjust the time
+	fild qword[rsp]
+	fld dword[rsi + PHYSCTX_TIME_COEFF]
+	fmulp
+	fstp qword[rsp]
+
+	; update displacement
+	fld dword[rdi + PLAYER_Y_POS]			; push y
+	fld dword[rdi + PLAYER_Y_VEL]			; push v
+    fld qword[rsp]							; push t
+    fmulp									; v * t
+	faddp									; y += v * t
+	fst dword[rdi + PLAYER_Y_POS]			; save new y_pos
+	fistp dword[rsp + 8]					; cast to integer and store
 
 	; update velocity
-	;movd xmm0, dword[rbp + PLAYER_Y_VEL]
+	fld dword[rdi + PLAYER_Y_VEL]			; push v
+	fld dword[rsi + PHYSCTX_GRAVITY_ACC]	; push a
+    fld qword[rsp]							; push t
+    fmulp									; a * t
+	faddp									; v += a * t
+	fstp dword[rdi + PLAYER_Y_VEL]
 
-	; update position
-	mov rdi, rbp
+	; set rectangle position
 	add rdi, PLAYER_RECT
-	mov esi, 1
-	mov edx, 1
-	call translate_rect
+	mov esi, dword[rdi + RECT_XPOS]
+	mov edx, dword[rsp + 8]
+	sub rsp, 8
+	call set_rect_pos
+	add rsp, 8
 
-	pop rbp
+	add rsp, 16
 
 	ret
 
@@ -1184,14 +1289,15 @@ _start:
 	; allocate some variables on the stack
 	sub rsp, 16
 
-	call get_sys_time
+	call get_time_usec
 	mov qword[rsp], rax		; last frame time
 	mov qword[rsp + 8], 0	; delta frame time
 
 	;;;
 	.l_main_loop:
 		; get current time at beginning of the frame
-		call get_sys_time
+		call get_time_usec
+
 		; and calculate the delta
 		sub rax, qword[rsp] 	
 		mov qword[rsp + 8], rax
@@ -1214,7 +1320,7 @@ _start:
 		; handle user input
 		call read_stdin_byte
 
-		cmp rax, KEY_W
+		cmp rax, KEY_Q
 		je .l_program_exit
 
 		jmp .l_main_loop
