@@ -1173,10 +1173,10 @@ draw_main_scene:
 ;
 setup_physics:
 	mov dword[rdi + PHYSCTX_GRAVITY_ACC], __float32__(9.81)
-	mov dword[rdi + PHYSCTX_JUMP_VEL], __float32__(250.0)
+	mov dword[rdi + PHYSCTX_JUMP_VEL], __float32__(500.0)
 	mov dword[rdi + PHYSCTX_TIME_COEFF], __float32__(0.000001)
-	mov dword[rdi + PHYSCTX_ACC_TUNE], __float32__(40.0)
-	mov dword[rdi + PHYSCTX_MAP_SCROLL_VEL], __float32__(100.0)
+	mov dword[rdi + PHYSCTX_ACC_TUNE], __float32__(80.0)
+	mov dword[rdi + PHYSCTX_MAP_SCROLL_VEL], __float32__(200.0)
 	ret
 
 
