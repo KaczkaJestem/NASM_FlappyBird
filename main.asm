@@ -112,6 +112,12 @@ const_player_rect_size	dd	32
 
 section		.data
 
+; ----- Variables -----
+ticks_since_keypress_space	db	KEYPRESS_COOLDOWN
+ticks_since_keypress_q		db	KEYPRESS_COOLDOWN
+
+time_since_last_jump 		dq	JUMP_COOLDOWN
+
 ; ----- Pointers -----
 
 ; we make them "null pointers" at the beginning
@@ -147,6 +153,8 @@ O_NONBLOCK			equ 2048
 
 F_GETFL				equ 3
 F_SETFL				equ 4
+
+EAGAIN				equ -11
 
 FBIOGET_VSCREENINFO	equ 0x4600
 FBIOGET_FSCREENINFO	equ 0x4602
@@ -201,6 +209,9 @@ ECHO						equ 8
 TIMEVAL_SEC					equ 0
 TIMEVAL_USEC				equ 8
 
+ZF_MASK						equ 0x0040
+ZF_MASK_SHIFT				equ 6
+
 ; ----- Key codes -----
 KEY_SPACE	equ	32
 KEY_Q		equ 113
@@ -214,6 +225,10 @@ COLOR_BLUE		equ 0x000000ff
 
 COLOR_GREY		equ 0x000f0f0f
 COLOR_YELLOW	equ 0x00ffff00
+
+; ----- Cooldowns -----
+JUMP_COOLDOWN		equ	100000	; microseconds
+KEYPRESS_COOLDOWN	equ	8		; ticks
 
 ; ===== TEXT SECTION =====
 
@@ -767,7 +782,7 @@ read_stdin_byte:
 	mov         rdx, 1			; set size_t count to 1 for one char
 	syscall
 
-	cmp rax, -11
+	cmp rax, EAGAIN
 	je .l_return
 
 	movzx rax, byte[rsp]
@@ -1143,6 +1158,131 @@ player_jump:
 	ret
 
 
+; Updates the delta frame and last frame timestamp.
+; Returns delta frame time in rax.
+; @param rdi - ptr to last frame time
+; @param rsi - ptr to delta frame time
+;
+update_time:
+	push rbp
+	push rdi
+	push rsi
+
+	; get current time
+	call get_time_usec
+	mov rbp, rax
+
+	pop rsi
+	pop rdi
+
+	; and calculate the delta
+	sub rax, qword[rdi]	
+	mov qword[rsi], rax
+
+	; then update the last frame time
+	mov qword[rdi], rbp
+
+	pop rbp
+	ret
+
+
+; Update action cooldowns
+;	@param rdi - delta frame time
+;
+update_cooldowns:
+	mov rax, qword[time_since_last_jump]
+	add rax, rdi
+	mov qword[time_since_last_jump], rax
+	
+	ret
+
+
+; Increments given byte, but does not overflow
+; @param rdi - ptr to 1 byte value
+;
+increment_byte_no_overflow:
+	movzx ax, byte[rdi]
+	add ax, 1
+	cmp ax, 255
+	jle .l_result_ok
+	mov al, 255
+	ret
+
+	.l_result_ok:
+		mov byte[rdi], al
+		ret
+
+
+; Reacts to user input
+; @param rdi - input key code
+;
+handle_user_input:
+	push rbp
+	mov rbp, rdi
+
+	; KEY_SPACE
+	cmp rbp, KEY_SPACE
+	jne .l_key_space_not_pressed
+	cmp byte[ticks_since_keypress_space], byte KEYPRESS_COOLDOWN
+	mov byte[ticks_since_keypress_space], 0
+	jb .l_key_space_handled
+
+	call player_jump_action
+	jmp .l_key_space_handled
+
+	.l_key_space_not_pressed:
+		mov rdi, ticks_since_keypress_space
+		call increment_byte_no_overflow
+
+	.l_key_space_handled:
+
+	; KEY_Q
+	cmp rbp, KEY_Q
+	jne .l_key_q_not_pressed
+	cmp byte[ticks_since_keypress_q], byte KEYPRESS_COOLDOWN
+	mov byte[ticks_since_keypress_q], 0
+	jb .l_key_q_handled
+
+	call quit_action
+	jmp .l_key_q_handled
+
+	.l_key_q_not_pressed:
+		mov rdi, ticks_since_keypress_q
+		call increment_byte_no_overflow
+
+	.l_key_q_handled:
+
+	pop rbp
+	ret
+
+
+; Performs player jump action.
+;
+player_jump_action:
+	mov rax, qword[time_since_last_jump]
+	cmp rax, JUMP_COOLDOWN
+	jge .l_cooldown_passed
+	ret
+
+	.l_cooldown_passed:
+		sub rsp, 8
+		mov rdi, player
+		mov rsi, physics_ctx
+		call player_jump
+		add rsp, 8
+
+		mov qword[time_since_last_jump], 0
+		ret
+
+
+; Performs program exit action
+;
+quit_action:
+	; exit normally
+	mov rdi, 0
+	jmp exit	; tailcall
+
+
 ; Does the cleanup and exits the program with given code.
 ; @param rdi - exit code
 ;
@@ -1312,15 +1452,16 @@ _start:
 
 	;;;
 	.l_main_loop:
-		; get current time at beginning of the frame
-		call get_time_usec
+		; update time
+		mov rax, rsp
+		mov rdi, rax
+		add rax, 8
+		mov rsi, rax
+		call update_time
 
-		; and calculate the delta
-		sub rax, qword[rsp] 	
-		mov qword[rsp + 8], rax
-		; then update the last frame time
-		add rax, qword[rsp]
-		mov qword[rsp], rax
+		; update cooldowns
+		mov rdi, rax
+		call update_cooldowns
 
 		; update the player
 		mov rdi, player
@@ -1334,19 +1475,15 @@ _start:
 		mov rdx, rect_background
 		call draw_main_scene
 
-		; handle user input
+		; read user input
 		call read_stdin_byte
 
-		cmp rax, KEY_SPACE
-		jne .l_main_loop
-		mov rdi, player
-		mov rsi, physics_ctx
-		call player_jump
-
-		cmp rax, KEY_Q
-		je .l_program_exit
+		; handle input
+		mov rdi, rax
+		call handle_user_input
 
 		jmp .l_main_loop
+		
 	;;;
 
 	.l_program_exit:
