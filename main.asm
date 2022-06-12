@@ -64,8 +64,9 @@ player				resb	24
 ; gravity_acc : dw (float)
 ; jump_vel : dw (float)
 ; time_coeff : dw (float)
+; acc_tune : dw (float)
 ;
-physics_ctx			resb	12
+physics_ctx			resb	16
 
 ; Timeval struct representation:
 ;
@@ -174,6 +175,7 @@ DRAWINGCTX_FRAMEBUFFER_PTR	equ 8
 PHYSCTX_GRAVITY_ACC			equ 0
 PHYSCTX_JUMP_VEL			equ 4
 PHYSCTX_TIME_COEFF			equ 8
+PHYSCTX_ACC_TUNE			equ 12
 
 RECT_XPOS					equ 0
 RECT_YPOS					equ 4
@@ -1076,8 +1078,9 @@ draw_main_scene:
 ;
 setup_physics:
 	mov dword[rdi + PHYSCTX_GRAVITY_ACC], __float32__(9.81)
-	mov dword[rdi + PHYSCTX_JUMP_VEL], __float32__(10.0)
+	mov dword[rdi + PHYSCTX_JUMP_VEL], __float32__(250.0)
 	mov dword[rdi + PHYSCTX_TIME_COEFF], __float32__(0.000001)
+	mov dword[rdi + PHYSCTX_ACC_TUNE], __float32__(40.0)
 	ret
 
 
@@ -1107,7 +1110,9 @@ simulate_player:
 
 	; update velocity
 	fld dword[rdi + PLAYER_Y_VEL]			; push v
-	fld dword[rsi + PHYSCTX_GRAVITY_ACC]	; push a
+	fld dword[rsi + PHYSCTX_GRAVITY_ACC]	; push a_orign
+	fld dword[rsi + PHYSCTX_ACC_TUNE]		; push a_tune
+	fmulp									; a = a_origin * a _tune
     fld qword[rsp]							; push t
     fmulp									; a * t
 	faddp									; v += a * t
@@ -1122,6 +1127,18 @@ simulate_player:
 	add rsp, 8
 
 	add rsp, 16
+
+	ret
+
+
+; Simulates player's jump.
+; @param rdi - ptr to player struct
+; @param rsi - ptr to physics context struct
+;
+player_jump:
+	fld dword[rsi + PHYSCTX_JUMP_VEL]
+	fchs
+	fstp dword[rdi + PLAYER_Y_VEL]
 
 	ret
 
@@ -1319,6 +1336,12 @@ _start:
 
 		; handle user input
 		call read_stdin_byte
+
+		cmp rax, KEY_SPACE
+		jne .l_main_loop
+		mov rdi, player
+		mov rsi, physics_ctx
+		call player_jump
 
 		cmp rax, KEY_Q
 		je .l_program_exit
