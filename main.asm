@@ -63,11 +63,12 @@ player				resb	SIZEOF_PLAYER
 ; Obstacle struct:
 ; rect : rectangle
 ; x_pos : dw (float)
+; spawn_delay : dw (float)
 ;
 ; Here's a static array that holds
 ; all obstacles present on the screen:
 ;
-obstacles_arr		resb	OBSTACLES_SIZE * SIZEOF_OBSTACLE
+obstacles_arr		resb	OBSTACLES_COUNT * SIZEOF_OBSTACLE
 
 ; Physics context struct:
 ; gravity_acc : dw (float)
@@ -88,7 +89,11 @@ physics_ctx			resb	SIZEOF_PHYSICS_CTX
 
 ; ----- Variables -----
 
-framebuffer_size	resb 	8
+framebuffer_size		resb 	8
+
+min_obstacle_height		resb	4
+max_obstacle_height		resb	4
+last_obstacle_pos		resb	1
 
 ; ===== READ ONLY DATA SECTION =====
 
@@ -132,7 +137,6 @@ time_since_last_jump 		dq	JUMP_COOLDOWN
 obstacles_top_index			db	0
 
 ; ----- Pointers -----
-
 ; we make them "null pointers" at the beginning
 framebuffer_ptr			dq	0
 framebuffer_backup_ptr	dq	0
@@ -210,6 +214,7 @@ PLAYER_Y_VEL				equ 20
 
 OBSTACLE_RECT				equ 0
 OBSTACLE_X_POS				equ 16
+OBSTACLE_SPAWN_DELAY		equ 20
 
 PROT_READ					equ 1
 PROT_WRITE					equ 2
@@ -235,7 +240,7 @@ SIZEOF_DRAWING_CTX			equ 16
 SIZEOF_TERMIOS				equ 36
 SIZEOF_RECT					equ 16
 SIZEOF_PLAYER				equ 24
-SIZEOF_OBSTACLE				equ 20
+SIZEOF_OBSTACLE				equ 24
 SIZEOF_PHYSICS_CTX			equ 20
 SIZEOF_TIMEVAL				equ 16
 
@@ -258,9 +263,7 @@ JUMP_COOLDOWN		equ	100000	; microseconds
 KEYPRESS_COOLDOWN	equ	8		; ticks
 
 ; ----- Gameplay -----
-OBSTACLES_SIZE			equ 10
-MIN_OBSTACLE_HEIGHT		equ 128
-MAX_OBSTACLE_HEIGHT		equ 256
+OBSTACLES_COUNT			equ 5
 
 ; ===== TEXT SECTION =====
 
@@ -989,13 +992,9 @@ check_rect_collision:
 	; rectangles are axis-alligned,
 	; we divide the problem to
 	; segment intersection checks
-	mov edx, dword[rdi + RECT_XPOS]
-	mov ecx, edx
-	mov ecx, dword[rdi + RECT_WIDTH]
-
-	mov esi, dword[rbp + RECT_XPOS]
-	mov edi, esi
-	add edi, dword[rbp + RECT_WIDTH]
+	mov edi, dword[rbp + RECT_XPOS]
+	mov esi, edi
+	add esi, dword[rbp + RECT_WIDTH]
 	mov edx, dword[r12 + RECT_XPOS]
 	mov ecx, edx
 	add ecx, dword[r12 + RECT_WIDTH]
@@ -1004,9 +1003,9 @@ check_rect_collision:
 	cmp rax, 0
 	je .l_return	; early return
 
-	mov esi, dword[rbp + RECT_YPOS]
-	mov edi, esi
-	add edi, dword[rbp + RECT_HEIGHT]
+	mov edi, dword[rbp + RECT_YPOS]
+	mov esi, edi
+	add esi, dword[rbp + RECT_HEIGHT]
 	mov edx, dword[r12 + RECT_YPOS]
 	mov ecx, edx
 	add ecx, dword[r12 + RECT_HEIGHT]
@@ -1041,7 +1040,7 @@ is_on_screen_fully:
 	jl .l_out_of_borders
 
 	add eax, dword[rdi + RECT_HEIGHT]
-	cmp eax, ecx
+	cmp eax, edx
 	jge .l_out_of_borders
 
 	mov rax, 1
@@ -1222,13 +1221,13 @@ draw_main_scene:
 	call draw_background
 
 	mov rdi, qword[rsp]
-	mov rsi, qword[rsp + 8]
-	call draw_player
-
-	mov rdi, qword[rsp]
 	mov rsi, qword[rsp + 16]
 	mov rdx, qword[rsp + 24]
 	call draw_obstacles
+
+	mov rdi, qword[rsp]
+	mov rsi, qword[rsp + 8]
+	call draw_player
 
 	add rsp, 40
 	ret
@@ -1242,7 +1241,7 @@ setup_physics:
 	mov dword[rdi + PHYSCTX_JUMP_VEL], __float32__(500.0)
 	mov dword[rdi + PHYSCTX_TIME_COEFF], __float32__(0.000001)
 	mov dword[rdi + PHYSCTX_ACC_TUNE], __float32__(80.0)
-	mov dword[rdi + PHYSCTX_MAP_SCROLL_VEL], __float32__(200.0)
+	mov dword[rdi + PHYSCTX_MAP_SCROLL_VEL], __float32__(150.0)
 	ret
 
 
@@ -1341,45 +1340,79 @@ simulate_obstacles:
 		mul rcx
 		add rax, r12
 
-		mov qword[rsp + 32], rax 						; save ptr to current obstacle
-		mov rdx, qword[rsp + 8]							; put ptr to physics_ctx into rdx
-		
-		; update displacement
-		fld dword[rax + OBSTACLE_X_POS]					; push x
-		fld dword[rdx + PHYSCTX_MAP_SCROLL_VEL]			; push v
-		fld qword[rsp]									; push t
-		fmulp											; v * t
-		fsubp											; x -= v * t
-		fst dword[rax + OBSTACLE_X_POS]					; save new x_pos
-		fistp dword[rsp + 24]							; cast to integer and store
+		; check if spawn delay has passed
+		fld dword[rax + OBSTACLE_SPAWN_DELAY]
+		fldz
+		fcomip
+		jae .l_spawn_delay_passed
 
-		; set rectangle position
-		mov esi, dword[rsp + 24]
-		add rax, OBSTACLE_RECT
-		mov rdi, rax
-		mov edx, dword[rax + RECT_YPOS]
-		call set_rect_pos
-
-		mov rdi, qword[rsp + 32]						; ptr to obstacle
-		add rdi, OBSTACLE_RECT							; make it point to rectangle
-		mov rsi, qword[rsp + 16]						; ptr to scr_info
-		call is_on_screen
-
-		cmp rax, 1
-		je .l_update_loop
-
-		; "regenerate" the old obastcle
-		mov rdi, qword[rsp + 32]						; ptr to the old obstacle
-		mov rsi, qword[rsp + 16]						; ptr to scr_info
-		call generate_random_obstacle
+		; if not, decrement it by detla time and continue
+		fld qword[rsp]
+		fchs
+		faddp
+		fstp dword[rax + OBSTACLE_SPAWN_DELAY]
 
 		jmp .l_update_loop
+
+		.l_spawn_delay_passed:
+			fstp st0										; pop fpu stack
+			mov qword[rsp + 32], rax 						; save ptr to current obstacle
+			mov rdx, qword[rsp + 8]							; put ptr to physics_ctx into rdx
+			
+			; update displacement
+			fld dword[rax + OBSTACLE_X_POS]					; push x
+			fld dword[rdx + PHYSCTX_MAP_SCROLL_VEL]			; push v
+			fld qword[rsp]									; push t
+			fmulp											; v * t
+			fsubp											; x -= v * t
+			fst dword[rax + OBSTACLE_X_POS]					; save new x_pos
+			fistp dword[rsp + 24]							; cast to integer and store
+
+			; set rectangle position
+			mov esi, dword[rsp + 24]
+			add rax, OBSTACLE_RECT
+			mov rdi, rax
+			mov edx, dword[rax + RECT_YPOS]
+			call set_rect_pos
+
+			mov rdi, qword[rsp + 32]						; ptr to obstacle
+			add rdi, OBSTACLE_RECT							; make it point to rectangle
+			mov rsi, qword[rsp + 16]						; ptr to scr_info
+			call is_on_screen
+
+			cmp rax, 1
+			je .l_update_loop
+
+			; "regenerate" the old obastcle
+			mov rdi, qword[rsp + 32]						; ptr to the old obstacle
+			mov rsi, qword[rsp + 16]						; ptr to scr_info
+			mov rdx, 0										; no spawn delay
+			call generate_random_obstacle
+
+			jmp .l_update_loop
 
 	.l_return:
 		add rsp, 40
 		pop r13
 		pop r12
 		ret
+
+
+; Calculates optimal spawn delay delta for obstacles and returns it in eax.
+; @param rdi - ptr to scr_info struct
+; @param rsi - ptr to physics_ctx struct
+; @param rdx - number of obstacles present on the level
+;
+calculate_obstacle_spawn_delay:
+	push rdx
+	fild dword[rdi + SCRINFO_XRES]
+	fild qword[rsp]
+	fdivp
+	fld dword[rsi + PHYSCTX_MAP_SCROLL_VEL]
+	fdivp
+	fstp dword[rsp]
+	pop rax
+	ret
 
 
 ; Updates the delta frame and last frame timestamp.
@@ -1510,26 +1543,24 @@ quit_action:
 ; Generated new random obstacle and saves it under given pointer
 ; @param rdi - ptr to the space allocated for the new obstacle
 ; @param rsi - ptr to scr_info struct
+; @param edx - spawn delay (float) in seconds
 ;
 generate_random_obstacle:
 	push r12
 	push r13
 	sub rsp, 8
 
+	mov dword[rdi + OBSTACLE_SPAWN_DELAY], edx
+
 	mov r12, rdi
 	mov r13, rsi
 
-	mov edi, MIN_OBSTACLE_HEIGHT
-	mov esi, MAX_OBSTACLE_HEIGHT
+	; randomize obstacle height
+	mov edi, dword[min_obstacle_height]
+	mov esi, dword[max_obstacle_height]
 	mov rdx, prng_seed
 	call get_rand_int
 	mov dword[rsp], eax
-
-	mov edi, 0
-	mov esi, 2
-	mov rdx, prng_seed
-	call get_rand_int
-	mov dword[rsp + 4], eax
 
 	mov eax, dword[const_obstacle_width]
 	mov dword[r12 + OBSTACLE_RECT + RECT_WIDTH], eax
@@ -1542,17 +1573,32 @@ generate_random_obstacle:
 	sub eax, 1
 	mov dword[r12 + OBSTACLE_RECT + RECT_XPOS], eax
 
-	mov eax, dword[r13 + SCRINFO_YRES]
-	sub eax, dword[r12 + OBSTACLE_RECT + RECT_HEIGHT]
-	mov dword[r12 + OBSTACLE_RECT + RECT_YPOS], eax
-
 	fild dword[r12 + OBSTACLE_RECT + RECT_XPOS]
 	fstp dword[r12 + OBSTACLE_X_POS]
 
-	add rsp, 8
-	pop r13
-	pop r12
-	ret
+	; decide about the positioning
+	mov al, byte[last_obstacle_pos]
+	xor al, 1
+	mov byte[last_obstacle_pos], al
+
+	cmp al, 0
+	jne .l_position_bottom
+
+	; top position	
+	mov dword[r12 + OBSTACLE_RECT + RECT_YPOS], 0
+	jmp .l_return
+
+	; bottom position
+	.l_position_bottom:
+		mov eax, dword[r13 + SCRINFO_YRES]
+		sub eax, dword[r12 + OBSTACLE_RECT + RECT_HEIGHT]
+		mov dword[r12 + OBSTACLE_RECT + RECT_YPOS], eax
+
+	.l_return:
+		add rsp, 8
+		pop r13
+		pop r12
+		ret
 
 
 ; Adds new random obstacle to the given array (if there's space for it).
@@ -1560,11 +1606,10 @@ generate_random_obstacle:
 ; @param rsi - ptr to current top index of obstacles array
 ; @param rdx - obstacles array size
 ; @param rcx - ptr to scr_info struct
+; @param r8d - obstacle spawn delay (float) in seconds
 ;
 add_random_obstacle:
 	movzx rax, byte[rsi]
-	add rax, 1
-
 	cmp rax, rdx
 	jb .l_sanity_check_ok
 	ret
@@ -1583,31 +1628,149 @@ add_random_obstacle:
 
 		mov rdi, rax
 		mov rsi, qword[rsp]
+		mov edx, r8d
 		call generate_random_obstacle
 		add rsp, 8
 	
 	ret
 
 
-; Returns ptr to the element of static array.
-; If element is out of bounds, then it returns nullptr.
-; @param rdi - index of the element
-; @param rsi - ptr to the array
-; @param rdx - size of element
-; @param rcx - size of array for sanity check
+; Sets up data needed to simulate obstacles on the level.
+; @param rdi - ptr to scr_info struct
 ;
-get_element:
-	cmp rdi, rcx
-	jb .l_sanity_check_ok
-	mov rax, 0
+setup_obstacle_sim_data:
+	mov byte[last_obstacle_pos], 0
+
+	mov eax, dword[rdi + SCRINFO_YRES]
+	mov ecx, 3
+	xor edx, edx
+	div ecx
+
+	mov dword[min_obstacle_height], eax
+	
+	shl eax, 1
+	mov dword[max_obstacle_height], eax
+	
 	ret
 
-	.l_sanity_check_ok:
-		mov rax, rdi
-		mul rdx
-		add rax, rsi
+
+; Adds given number of random obstacles to the level (if there's space for them).
+; @param rdi - ptr to static array of obstacles
+; @param rsi - ptr to current top index of obstacles array
+; @param rdx - obstacles array size
+; @param rcx - ptr to scr_info struct
+; @param r8 - ptr to physic_ctx struct
+;
+add_random_obstacles:
+	push rbp
+	push rdi
+	push rsi
+	push rdx
+	push rcx
+	sub rsp, 16
+
+	mov rbp, rdx
+
+	mov rdi, rcx
+	mov rsi, r8
+	mov rdx, rdx
+	call calculate_obstacle_spawn_delay
+	mov dword[rsp + 8], 0
+	mov dword[rsp], eax
+
+	.l_add_loop:
+		cmp rbp, 0
+		je .l_return
+		sub rbp, 1
+
+		mov rdi, qword[rsp + 40]
+		mov rsi, qword[rsp + 32]
+		mov rdx, qword[rsp + 24]
+		mov rcx, qword[rsp + 16]
+		mov r8d, dword[rsp + 8]
+		call add_random_obstacle
+
+		fld dword[rsp]
+		fld dword[rsp + 8]
+		faddp
+		fstp dword[rsp + 8]
+
+		jmp .l_add_loop
+
+	.l_return:
+		add rsp, 48
+		pop rbp
 		ret
 
+
+; Checks if there is a collision between the player and any obstacle.
+; Returns 1 in rax if such collision occurs or 0 otherwise.
+; @param rdi - ptr to static array of obstacles
+; @param rsi - ptr to current top index of obstacles array
+; @param rdx - ptr to player struct
+;
+check_player_obstacle_collision:
+	push rbp
+	push rdi
+	push rdx
+
+	movzx rbp, byte[rsi]
+
+	.l_check_loop:
+		cmp rbp, 0
+		je .l_return
+		sub rbp, 1
+
+		mov rax, rbp
+		mov rcx, SIZEOF_OBSTACLE
+		mul rcx
+		add rax, qword[rsp + 8]
+		add rax, OBSTACLE_RECT
+
+		mov rdi, qword[rsp]
+		add rdi, PLAYER_RECT
+		mov rsi, rax
+		call check_rect_collision
+
+		cmp rax, 1
+		je .l_return
+
+		jmp .l_check_loop
+
+	xor rax, rax
+
+	.l_return:
+		add rsp, 16
+		pop rbp
+		ret
+
+
+; Checks the conditions of failure in the game.
+; Returns 1 in rax if player failed or 0 otherwise.
+; @param rdi - ptr to static array of obstacles
+; @param rsi - ptr to current top index of obstacles array
+; @param rdx - ptr to player struct
+; @param rcx - ptr to scr_info struct
+;
+check_game_failed_cond:
+	sub rsp, 8
+	push rcx
+	push rdx
+
+	call check_player_obstacle_collision
+
+	cmp rax, 1
+	je .l_return
+
+	mov rdi, qword[rsp]
+	add rdi, PLAYER_RECT
+	mov rsi, qword[rsp + 8]
+	call is_on_screen_fully
+	xor rax, 1
+
+	.l_return:
+		add rsp, 24
+		ret
 
 ; Does the cleanup and exits the program with given code.
 ; @param rdi - exit code
@@ -1769,20 +1932,24 @@ _start:
 	mov rdi, physics_ctx
 	call setup_physics
 
+	; setup simulation data for obstacles
+	mov rdi, scr_info
+	call setup_obstacle_sim_data
+
+	; add some obstacles on the level
+	mov rdi, obstacles_arr
+	mov rsi, obstacles_top_index
+	mov rdx, OBSTACLES_COUNT
+	mov rcx, scr_info
+	mov r8, physics_ctx
+	call add_random_obstacles
+
 	; allocate some variables on the stack
 	sub rsp, 16
 
 	call get_time_usec
 	mov qword[rsp], rax		; last frame time
 	mov qword[rsp + 8], 0	; delta frame time
-
-	;;
-	mov rdi, obstacles_arr
-	mov rsi, obstacles_top_index
-	mov rdx, OBSTACLES_SIZE
-	mov rcx, scr_info
-	call add_random_obstacle
-	;;
 
 	;;;
 	.l_main_loop:
@@ -1797,12 +1964,6 @@ _start:
 		mov rdi, rax
 		call update_cooldowns
 
-		; update the player
-		mov rdi, player
-		mov rsi, physics_ctx
-		mov rdx, qword[rsp + 8]
-		call simulate_player
-
 		; update obstacles
 		mov rdi, obstacles_arr
 		mov rsi, obstacles_top_index
@@ -1811,6 +1972,12 @@ _start:
 		mov r8, scr_info
 		call simulate_obstacles
 
+		; update the player
+		mov rdi, player
+		mov rsi, physics_ctx
+		mov rdx, qword[rsp + 8]
+		call simulate_player
+
 		; draw the scene
 		mov rdi, drawing_ctx
 		mov rsi, player
@@ -1818,6 +1985,17 @@ _start:
 		mov rcx, obstacles_arr
 		mov r8, obstacles_top_index
 		call draw_main_scene
+
+		; check if player failed in the game
+		mov rdi, obstacles_arr
+		mov rsi, obstacles_top_index
+		mov rdx, player
+		mov rcx, scr_info
+		call check_game_failed_cond
+
+		; quit on player failure
+		cmp rax, 1
+		je .l_program_exit
 
 		; read user input
 		call read_stdin_byte
