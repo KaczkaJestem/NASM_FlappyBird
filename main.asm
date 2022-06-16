@@ -872,13 +872,13 @@ draw_pixel:
 		; ecx := (x + xoffset) * bytes_per_pixel
 		mov eax, edi
 		add eax, ecx
-		mul r8d
+		imul r8d
 		mov ecx, eax
 
 		; eax := (y + yoffset) * line_length
 		mov eax, esi
 		add eax, edx
-		mul r9d
+		imul r9d
 
 		; rax will store calculated location of pixel data
 		add rax, rcx
@@ -893,65 +893,145 @@ draw_pixel:
 		ret
 
 
+; Returns in rax the bigger of two given numbers.
+; @param rdi - first integer
+; @param rsi - second integer
+;
+max:
+	cmp rdi, rsi
+	jl .l_first_is_smaller
+	mov rax, rdi
+	ret
+
+	.l_first_is_smaller:
+		mov rax, rsi
+		ret
+
+
+; Returns in rax the smaller of two given numbers.
+; @param rdi - first integer
+; @param rsi - second integer
+;
+min:
+	cmp rdi, rsi
+	jl .l_first_is_smaller
+	mov rax, rsi
+	ret
+
+	.l_first_is_smaller:
+		mov rax, rdi
+		ret
+
+
 ; Draws a rectangle on a framebuffer
 ; @param rdi - ptr to rectangle struct
 ; @param rsi - color (4 byte, ARGB format)
 ; @param rdx - ptr to drawing_ctx struct
 ;
 draw_rectangle:
-	push rbp
-	push r15
-	push r14
-	push r13
-	push r12
+	push r12		; rsp + 64
+	push r13		; rsp + 56
+	push rbp		; rsp + 48
+	push rsi		; rsp + 40
+	push rdx		; rsp + 32
+	sub rsp, 32		; rsp
 
-	sub rsp, 16
-	mov qword[rsp], rsi 		; put color on the stack
-	mov qword[rsp + 8], rdx		; put drawing_ctx on the stack
+	mov rbp, rdi													; store ptr to rectangle
 
-	mov r12d, dword[rdi + RECT_XPOS]	; current xpos
-	mov r13d, dword[rdi + RECT_YPOS]	; current ypos
+	; x_min := max(xpos, 0)
+	mov edi, dword[rbp + RECT_XPOS]
+	xor rsi, rsi
+	call max
+	mov dword[rsp], eax												; store x_min under [rsp]
 
-	mov ebp, r12d	; store the original xpos in ebx
+	; x_max := min(xpos + width, xres)
+	mov edi, dword[rbp + RECT_XPOS]
+	add edi, dword[rbp + RECT_WIDTH]
+	mov rsi, qword[rsp + 32]
+	mov rsi, qword[rsi + DRAWINGCTX_SCR_INFO]
+	mov esi, dword[rsi + SCRINFO_XRES]
+	call min
+	mov dword[rsp + 4], eax											; store x_max under [rsp + 4]
 
-	mov r14d, r12d
-	add r14d, dword[rdi + RECT_WIDTH]	; desired xpos
-	mov r15d, r13d
-	add r15d, dword[rdi + RECT_HEIGHT]	; desired ypos
-	
+	; y_min := max(ypos, 0)
+	mov edi, dword[rbp + RECT_YPOS]
+	xor rsi, rsi
+	call max
+	mov dword[rsp + 8], eax											; store y_min under [rsp + 8]
+
+	; y_max := min(ypos + height, yres)
+	mov edi, dword[rbp + RECT_YPOS]
+	add edi, dword[rbp + RECT_HEIGHT]
+	mov rsi, qword[rsp + 32]
+	mov rsi, qword[rsi + DRAWINGCTX_SCR_INFO]
+	mov esi, dword[rsi + SCRINFO_YRES]
+	call min
+	mov dword[rsp + 12], eax										; store y_max under [rsp + 12]
+
+	; size_y := y_max - y_min
+	sub eax, dword[rsp + 8]
+
+	; early return when size is negative or zero
+	cmp eax, 0
+	jle .l_return
+	mov dword[rsp + 16], eax										; store size_y under [rsp + 16]
+
+	; size_x := x_max - x_min
+	mov eax, dword[rsp + 4]
+	sub eax, dword[rsp]
+
+	; early return when size is negative or zero
+	cmp eax, 0
+	jle .l_return
+	mov dword[rsp + 20], eax										; store size_x under [rsp + 20]
+
+	; computing begin data pointer
+	mov rbp, qword[rsp + 32]										; get ptr to scr_info
+	mov rbp, qword[rbp + DRAWINGCTX_SCR_INFO]
+
+	; begin_pos := (x_min + xoffset) * bytes_per_pixel + (y_min + yoffset) * line_length
+	mov ecx, dword[rsp + 8]
+	add ecx, dword[rbp + SCRINFO_YOFFSET]
+	mov eax, dword[rbp + SCRINFO_LINE_LEN]
+	imul ecx
+	mov ecx, eax
+	mov edx, dword[rsp]
+	add edx, dword[rbp + SCRINFO_XOFFSET]
+	mov eax, dword[rbp + SCRINFO_BPP]
+	shr eax, 3
+	imul edx 
+	add eax, ecx
+
+	; main drawing loop
+	mov r12d, dword[rbp + SCRINFO_LINE_LEN]							; store line_length
+
+	mov r13d, dword[rsp + 16]										; setup loop counter
+
+	mov rbp, qword[rsp + 32]
+	mov rbp, qword[rbp + DRAWINGCTX_FRAMEBUFFER_PTR]				; get ptr to framebuffer
+	add rbp, rax													; adjust it by begin_pos
+
+	mov qword[rsp + 24], rbp
+
 	.l_draw_loop:
-		mov rdi, r12				; xpos
-		mov rsi, r13				; ypos
-		mov rdx, qword[rsp]			; color
-		mov rcx, qword[rsp + 8]		; drawing_ctx ptr
-		call draw_pixel
+		cmp r13d, 0
+		je .l_return
+		sub r13d, 1
 
-		; go to the next pixel in a row
-		add r12d, 1
+		mov eax, dword[rsp + 40]									; store COLOR
+		mov rdi, rbp
+		mov ecx, dword[rsp + 20]
+		rep stosd
 
-		; check if exceeded row length
-		cmp r12d, r14d
-		jl .l_draw_loop
+		add rbp, r12
+		jmp .l_draw_loop
 
-		; if exceeded current row length,
-		; move to the next row
-		add r13d, 1
-		mov r12d, ebp
-		
-		.l_loop_condition:
-			cmp r13d, r15d
-			jl .l_draw_loop
-
-	; free stack memory
-	add rsp, 16
-
-	pop r12
-	pop r13
-	pop r14
-	pop r15
-	pop rbp
-
-	ret
+	.l_return:
+		add rsp, 48
+		pop rbp
+		pop r13
+		pop r12
+		ret
 
 
 ; Checks if two segments collide.
@@ -1085,7 +1165,7 @@ is_on_screen:
 		ret
 
 
-; Sets the posiiton of a rectangle to given (x, y) coordinates.
+; Sets the position of a rectangle to given (x, y) coordinates.
 ; @param rdi - ptr to rectangle
 ; @param esi - x
 ; @param edx - y
