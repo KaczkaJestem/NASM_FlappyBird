@@ -130,8 +130,8 @@ const_obstacle_width	dd	32
 section		.data
 
 ; ----- Variables -----
-ticks_since_keypress_space	db	KEYPRESS_COOLDOWN
-ticks_since_keypress_q		db	KEYPRESS_COOLDOWN
+time_since_keypress_space	dq	KEYPRESS_COOLDOWN
+time_since_keypress_q		dq	KEYPRESS_COOLDOWN
 
 time_since_last_jump 		dq	JUMP_COOLDOWN
 
@@ -263,8 +263,8 @@ COLOR_GREY		equ 0x000f0f0f
 COLOR_YELLOW	equ 0x00ffff00
 
 ; ----- Cooldowns -----
-JUMP_COOLDOWN		equ	300000	; microseconds
-KEYPRESS_COOLDOWN	equ	8		; ticks
+JUMP_COOLDOWN		equ	200000	; microseconds
+KEYPRESS_COOLDOWN	equ	100000	; microseconds
 
 ; ----- Gameplay -----
 OBSTACLES_COUNT			equ 5
@@ -1570,44 +1570,48 @@ increment_byte_no_overflow:
 
 ; Reacts to user input
 ; @param rdi - input key code
+; @param rsi - delta frame time
 ;
 handle_user_input:
-	push rbp
-	mov rbp, rdi
+	sub rsp, 24
+	mov qword[rsp], rdi
+	mov qword[rsp + 8], rsi
 
 	; KEY_SPACE
-	cmp rbp, KEY_SPACE
+	cmp qword[rsp], KEY_SPACE
 	jne .l_key_space_not_pressed
-	cmp byte[ticks_since_keypress_space], byte KEYPRESS_COOLDOWN
-	mov byte[ticks_since_keypress_space], 0
+	cmp qword[time_since_keypress_space], KEYPRESS_COOLDOWN
+	mov qword[time_since_keypress_space], 0
 	jb .l_key_space_handled
 
 	call player_jump_action
 	jmp .l_key_space_handled
 
 	.l_key_space_not_pressed:
-		mov rdi, ticks_since_keypress_space
-		call increment_byte_no_overflow
+		mov rax, qword[time_since_keypress_space]
+		add rax, qword[rsp + 8]
+		mov qword[time_since_keypress_space], rax
 
 	.l_key_space_handled:
 
 	; KEY_Q
-	cmp rbp, KEY_Q
+	cmp qword[rsp], KEY_Q
 	jne .l_key_q_not_pressed
-	cmp byte[ticks_since_keypress_q], byte KEYPRESS_COOLDOWN
-	mov byte[ticks_since_keypress_q], 0
+	cmp qword[time_since_keypress_q], KEYPRESS_COOLDOWN
+	mov qword[time_since_keypress_q], 0
 	jb .l_key_q_handled
 
 	call quit_action
 	jmp .l_key_q_handled
 
 	.l_key_q_not_pressed:
-		mov rdi, ticks_since_keypress_q
-		call increment_byte_no_overflow
+		mov rax, qword[time_since_keypress_q]
+		add rax, qword[rsp + 8]
+		mov qword[time_since_keypress_q], rax
 
 	.l_key_q_handled:
 
-	pop rbp
+	add rsp, 24
 	ret
 
 
@@ -2108,6 +2112,7 @@ _start:
 
 		; handle input
 		mov rdi, rax
+		mov rsi, qword[rsp + 8]
 		call handle_user_input
 
 		jmp .l_main_loop
