@@ -1135,8 +1135,6 @@ is_on_screen_fully:
 		ret
 
 
-;
-;
 ; Returns 1 in rax if given rectangle or any part of it is visible on the screen.
 ; @param rdi - ptr to the rectangle
 ; @param rsi - ptr to scr_info struct
