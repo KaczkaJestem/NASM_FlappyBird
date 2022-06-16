@@ -27,6 +27,8 @@ scr_info			resb	SIZEOF_SCR_INFO
 ; Drawing context struct:
 ; screen_info_ptr : qw
 ; framebuffer_ptr : qw
+; dbuffer_ptr : qw
+; framebuffer_size : qw
 ;
 drawing_ctx			resb 	SIZEOF_DRAWING_CTX
 
@@ -88,7 +90,6 @@ physics_ctx			resb	SIZEOF_PHYSICS_CTX
 ; 
 
 ; ----- Variables -----
-
 framebuffer_size		resb 	8
 
 min_obstacle_height		resb	4
@@ -114,7 +115,7 @@ str_brk_err				db	'BRK syscall failed. Cannot allocate memory!', 0xa, 0
 str_gettimeofday_err	db	'GETTIMEOFDAY syscall failed!', 0xa, 0
 str_err_code			db	'Error code: %d', 0xa, 0
 
-str_no_blink			db '\033[?12l', 0
+str_no_blink			db '\033[?12l', 0xa, 0
 
 str_dbg_f				db '%f', 0xa, 0
 str_dbg_d				db '%d', 0xa, 0
@@ -138,10 +139,11 @@ obstacles_top_index			db	0
 
 ; ----- Pointers -----
 ; we make them "null pointers" at the beginning
-framebuffer_ptr			dq	0
-framebuffer_backup_ptr	dq	0
-initial_break_ptr		dq	0
-current_break_ptr		dq	0
+framebuffer_ptr				dq	0
+framebuffer_dbuffer_ptr		dq	0
+framebuffer_backup_ptr		dq	0
+initial_break_ptr			dq	0
+current_break_ptr			dq	0
 
 ; ----- File descriptors -----
 fd_stdin			equ	0
@@ -196,6 +198,8 @@ SCRINFO_LINE_LEN			equ 20
 
 DRAWINGCTX_SCR_INFO			equ 0
 DRAWINGCTX_FRAMEBUFFER_PTR	equ 8
+DRAWINGCTX_DBUFFER_PTR		equ 16
+DRAWINGCTX_FRAMEBUFFER_SIZE	equ 24
 
 PHYSCTX_GRAVITY_ACC			equ 0
 PHYSCTX_JUMP_VEL			equ 4
@@ -236,7 +240,7 @@ ZF_MASK_SHIFT				equ 6
 
 ; ----- Sizeofs -----
 SIZEOF_SCR_INFO				equ 24
-SIZEOF_DRAWING_CTX			equ 16
+SIZEOF_DRAWING_CTX			equ 32
 SIZEOF_TERMIOS				equ 36
 SIZEOF_RECT					equ 16
 SIZEOF_PLAYER				equ 24
@@ -259,7 +263,7 @@ COLOR_GREY		equ 0x000f0f0f
 COLOR_YELLOW	equ 0x00ffff00
 
 ; ----- Cooldowns -----
-JUMP_COOLDOWN		equ	100000	; microseconds
+JUMP_COOLDOWN		equ	300000	; microseconds
 KEYPRESS_COOLDOWN	equ	8		; ticks
 
 ; ----- Gameplay -----
@@ -860,7 +864,7 @@ draw_pixel:
 		ret
 
 	.l_sanity_check_ok:
-		mov r12, qword[rcx + DRAWINGCTX_FRAMEBUFFER_PTR]
+		mov r12, qword[rcx + DRAWINGCTX_DBUFFER_PTR]
 		mov r13, rdx
 
 		mov ecx, dword[rbp + SCRINFO_XOFFSET]	; xoffset
@@ -893,18 +897,18 @@ draw_pixel:
 		ret
 
 
-; Returns in rax the bigger of two given numbers.
-; @param rdi - first integer
-; @param rsi - second integer
+; Returns in eax the bigger of two given numbers.
+; @param edi - first integer
+; @param esi - second integer
 ;
 max:
-	cmp rdi, rsi
+	cmp edi, esi
 	jl .l_first_is_smaller
-	mov rax, rdi
+	mov eax, edi
 	ret
 
 	.l_first_is_smaller:
-		mov rax, rsi
+		mov eax, esi
 		ret
 
 
@@ -913,13 +917,13 @@ max:
 ; @param rsi - second integer
 ;
 min:
-	cmp rdi, rsi
+	cmp edi, esi
 	jl .l_first_is_smaller
-	mov rax, rsi
+	mov eax, esi
 	ret
 
 	.l_first_is_smaller:
-		mov rax, rdi
+		mov eax, edi
 		ret
 
 
@@ -1008,7 +1012,7 @@ draw_rectangle:
 	mov r13d, dword[rsp + 16]										; setup loop counter
 
 	mov rbp, qword[rsp + 32]
-	mov rbp, qword[rbp + DRAWINGCTX_FRAMEBUFFER_PTR]				; get ptr to framebuffer
+	mov rbp, qword[rbp + DRAWINGCTX_DBUFFER_PTR]					; get ptr to framebuffer
 	add rbp, rax													; adjust it by begin_pos
 
 	mov qword[rsp + 24], rbp
@@ -1283,6 +1287,17 @@ draw_obstacles:
 		ret
 
 
+; Flushes the data from the dbuffer to the mapped framebuffer file.
+; @param rdi - ptr to drawing_ctx struct
+;
+flush_framebuffer:
+	mov rsi, qword[rdi + DRAWINGCTX_DBUFFER_PTR]
+	mov rdx, qword[rdi + DRAWINGCTX_FRAMEBUFFER_SIZE]
+	mov rdi, qword[rdi + DRAWINGCTX_FRAMEBUFFER_PTR]
+	call my_memcpy
+	ret
+
+
 ; Draws the main scene.
 ; @param rdi - ptr to drawing_ctx struct
 ; @param rsi - ptr to player struct
@@ -1308,6 +1323,9 @@ draw_main_scene:
 	mov rdi, qword[rsp]
 	mov rsi, qword[rsp + 8]
 	call draw_player
+
+	mov rdi, qword[rsp]
+	call flush_framebuffer
 
 	add rsp, 40
 	ret
@@ -1456,12 +1474,12 @@ simulate_obstacles:
 			call set_rect_pos
 
 			mov rdi, qword[rsp + 32]						; ptr to obstacle
-			add rdi, OBSTACLE_RECT							; make it point to rectangle
-			mov rsi, qword[rsp + 16]						; ptr to scr_info
-			call is_on_screen
+			add rdi, OBSTACLE_RECT							; make it point to the rectangle
+			mov eax, dword[rdi + RECT_XPOS]	 				; get xpos of rectangle's right corner
+			add eax, dword[rdi + RECT_WIDTH]				;
 
-			cmp rax, 1
-			je .l_update_loop
+			cmp eax, 0										; check if the rectangle went out of the screen
+			jge .l_update_loop
 
 			; "regenerate" the old obastcle
 			mov rdi, qword[rsp + 32]						; ptr to the old obstacle
@@ -1649,8 +1667,6 @@ generate_random_obstacle:
 
 	; put the new obstacle behind the right border of the screen
 	mov eax, dword[r13 + SCRINFO_XRES]
-	; but also make it bearly visible:
-	sub eax, 1
 	mov dword[r12 + OBSTACLE_RECT + RECT_XPOS], eax
 
 	fild dword[r12 + OBSTACLE_RECT + RECT_XPOS]
@@ -1664,7 +1680,7 @@ generate_random_obstacle:
 	cmp al, 0
 	jne .l_position_bottom
 
-	; top position	
+	; top position
 	mov dword[r12 + OBSTACLE_RECT + RECT_YPOS], 0
 	jmp .l_return
 
@@ -1961,12 +1977,18 @@ _start:
 	mov qword[framebuffer_ptr], rax
 	mov qword[framebuffer_size], rdx
 
+	; allocate memory for second buffer
+	; to support double-buffering
+	mov rdi, qword[framebuffer_size]
+	call my_malloc
+	mov qword[framebuffer_dbuffer_ptr], rax
+
 	; allocate memory and copy the framebuffer there
 	; to be able to restore it on program exit
 	mov rdi, qword[framebuffer_size]
 	call my_malloc
 	mov qword[framebuffer_backup_ptr], rax
-	
+
 	mov rdi, qword[framebuffer_backup_ptr]
 	mov rsi, qword[framebuffer_ptr]
 	mov rdx, qword[framebuffer_size]
@@ -1993,6 +2015,10 @@ _start:
 	mov qword[drawing_ctx + DRAWINGCTX_SCR_INFO], scr_info
 	mov rax, qword[framebuffer_ptr]
 	mov qword[drawing_ctx + DRAWINGCTX_FRAMEBUFFER_PTR], rax
+	mov rax, qword[framebuffer_dbuffer_ptr]
+	mov qword[drawing_ctx + DRAWINGCTX_DBUFFER_PTR], rax
+	mov rax, qword[framebuffer_size]
+	mov qword[drawing_ctx + DRAWINGCTX_FRAMEBUFFER_SIZE], rax
 
 	; setup background rectangle
 	mov dword[rect_background + RECT_XPOS], 0
